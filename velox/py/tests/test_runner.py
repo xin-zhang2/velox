@@ -84,8 +84,8 @@ class TestPyVeloxRunner(unittest.TestCase):
         self.assertRaises(StopIteration, next, iterator)
 
         expected_result = to_velox(
-            pyarrow.record_batch([pyarrow.array([97, 96, 95, 94, 93])], names=["c0"]
-        ))
+            pyarrow.record_batch([pyarrow.array([97, 96, 95, 94, 93])], names=["c0"])
+        )
         self.assertEqual(output, expected_result)
 
     def test_runner_with_join(self):

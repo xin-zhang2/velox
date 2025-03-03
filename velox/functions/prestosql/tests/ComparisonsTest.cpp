@@ -500,7 +500,10 @@ TEST_F(ComparisonsTest, eqNeqArray) {
   test(std::nullopt, {{1}}, std::nullopt);
   test({{1}}, std::nullopt, std::nullopt);
 
-  test(std::make_optional<std::vector<std::optional<int64_t>>>({}), std::make_optional<std::vector<std::optional<int64_t>>>({}), true);
+  test(
+      std::make_optional<std::vector<std::optional<int64_t>>>({}),
+      std::make_optional<std::vector<std::optional<int64_t>>>({}),
+      true);
 
   test({{1, 2, 3}}, {{1, 2, 3}}, true);
   test({{1, 2, 3}}, {{1, 2, 4}}, false);
@@ -512,7 +515,10 @@ TEST_F(ComparisonsTest, eqNeqArray) {
   test({{1, std::nullopt}}, {{1, 2}}, std::nullopt);
 
   // Different size arrays.
-  test(std::make_optional<std::vector<std::optional<int64_t>>>({}), {{std::nullopt, std::nullopt}}, false);
+  test(
+      std::make_optional<std::vector<std::optional<int64_t>>>({}),
+      {{std::nullopt, std::nullopt}},
+      false);
   test({{1, 2}}, {{1, 2, std::nullopt}}, false);
   test(
       {{std::nullopt, std::nullopt}},
@@ -553,7 +559,10 @@ TEST_F(ComparisonsTest, eqNeqMap) {
   // Elements checked in sorted order.
   test({{{3, 4}, {1, 2}}}, {{{1, 2}, {3, 4}}}, true);
 
-  test(std::make_optional<map_t::value_type>({}), std::make_optional<map_t::value_type>({}), true);
+  test(
+      std::make_optional<map_t::value_type>({}),
+      std::make_optional<map_t::value_type>({}),
+      true);
 
   test({{{1, 2}, {3, 5}}}, {{{1, 2}, {3, 4}}}, false);
 

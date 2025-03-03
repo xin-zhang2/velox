@@ -439,8 +439,7 @@ TEST_F(CompactRowTest, arrayOfTimestamp) {
 
 TEST_F(CompactRowTest, arrayOfString) {
   auto data = makeRowVector({
-      makeArrayVector<std::string>(
-        std::vector<std::vector<std::string>>{
+      makeArrayVector<std::string>(std::vector<std::vector<std::string>>{
           {"a", "abc", "Longer test string"},
           {"b", "Abc 12345 ...test", "foo"},
           {},
@@ -451,18 +450,18 @@ TEST_F(CompactRowTest, arrayOfString) {
 
   data = makeRowVector({
       makeNullableArrayVector<std::string>(
-        std::vector<std::optional<std::vector<std::optional<std::string>>>>{
-          {{"a", std::nullopt, "abc", "Longer test string"}},
-          {{std::nullopt,
-            "b",
-            std::nullopt,
-            "Abc 12345 ...test",
-            std::nullopt,
-            "foo"}},
-          std::make_optional<std::vector<std::optional<std::string>>>({}),
-          {{std::nullopt}},
-          std::nullopt,
-      }),
+          std::vector<std::optional<std::vector<std::optional<std::string>>>>{
+              {{"a", std::nullopt, "abc", "Longer test string"}},
+              {{std::nullopt,
+                "b",
+                std::nullopt,
+                "Abc 12345 ...test",
+                std::nullopt,
+                "foo"}},
+              std::make_optional<std::vector<std::optional<std::string>>>({}),
+              {{std::nullopt}},
+              std::nullopt,
+          }),
   });
 
   testRoundTrip(data);

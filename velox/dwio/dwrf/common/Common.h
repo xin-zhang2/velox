@@ -158,6 +158,7 @@ struct EncodingKeyHash {
 
 class DwrfStreamIdentifier : public dwio::common::StreamIdentifier {
  public:
+  using StreamIdentifier::operator==;
   static const DwrfStreamIdentifier& getInvalid() {
     static const DwrfStreamIdentifier kInvalidId;
     return kInvalidId;
