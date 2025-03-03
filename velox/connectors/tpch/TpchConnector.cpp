@@ -89,10 +89,7 @@ TpchDataSource::TpchDataSource(
     auto handle = std::dynamic_pointer_cast<TpchColumnHandle>(it->second);
     VELOX_CHECK_NOT_NULL(
         handle,
-        "ColumnHandle must be an instance of TpchColumnHandle "
-        "for '{}' on table '{}'",
-        handle->name(),
-        toTableName(tpchTable_));
+        "ColumnHandle can't be null.");
 
     auto idx = tpchTableSchema->getChildIdxIfExists(handle->name());
     VELOX_CHECK(

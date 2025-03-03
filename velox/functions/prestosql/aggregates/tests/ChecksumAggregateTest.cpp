@@ -282,7 +282,7 @@ TEST_F(ChecksumAggregateTest, arrays) {
   assertChecksum(arrayVector, "Nlzernkj88A=");
 
   arrayVector =
-      makeNullableArrayVector<int64_t>({{{1, 2}}, std::nullopt, {{}}});
+      makeNullableArrayVector<int64_t>({{{1, 2}}, std::nullopt, std::make_optional<std::vector<std::optional<int64_t>>>({})});
   assertChecksum(arrayVector, "Nlzernkj88A=");
 
   // Array of arrays.

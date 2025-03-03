@@ -232,8 +232,7 @@ void ExpressionRunner::run(
               inputPathsList[i].c_str(), deserializerPool.get()));
       VELOX_CHECK_NOT_NULL(
           inputVector,
-          "Input vector is not a RowVector: {}",
-          inputVector->toString());
+          "Input vector can't be null.");
       VELOX_CHECK_GT(inputVector->size(), 0, "Input vector must not be empty.");
       if (inputSelectivityPaths.size() > i) {
         inputTestCases.push_back(
