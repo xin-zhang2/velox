@@ -586,6 +586,10 @@ class IOBufOutputStream : public OutputStream {
   std::unique_ptr<folly::IOBuf> getIOBuf(
       const std::function<void()>& releaseFn = nullptr);
 
+  ByteOutputStream& out() {
+    return *out_;
+  }
+
  private:
   std::shared_ptr<StreamArena> arena_;
   std::unique_ptr<ByteOutputStream> out_;

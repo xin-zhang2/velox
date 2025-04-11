@@ -249,6 +249,9 @@ class QueryConfig {
   static constexpr const char* kPartitionedOutputEagerFlush =
       "partitioned_output_eager_flush";
 
+  static constexpr const char* kOptimizedPartitionedOutputEnabled =
+      "optimized_repartitioning";
+
   /// The maximum number of bytes to buffer in PartitionedOutput operator to
   /// avoid creating tiny SerializedPages.
   ///
@@ -943,6 +946,10 @@ class QueryConfig {
 
   bool partitionedOutputEagerFlush() const {
     return get<bool>(kPartitionedOutputEagerFlush, false);
+  }
+
+  bool optimizedPartitionedOutputEnabled() const {
+    return get<bool>(kOptimizedPartitionedOutputEnabled, false);
   }
 
   uint64_t maxPartitionedOutputBufferSize() const {

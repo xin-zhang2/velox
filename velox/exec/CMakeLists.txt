@@ -69,6 +69,7 @@ velox_add_library(
   OperatorTraceScan.cpp
   OperatorTraceWriter.cpp
   OperatorUtils.cpp
+  OptimizedPartitionedOutput.cpp
   OrderBy.cpp
   OutputBuffer.cpp
   OutputBufferManager.cpp
@@ -130,6 +131,11 @@ velox_link_libraries(
   velox_test_util
   velox_vector
 )
+#=======
+#  velox_arrow_bridge
+#  velox_common_compression
+#  xsimd)
+#>>>>>>> 2541093d2 (Improve HivePartitionFunction)
 
 velox_add_library(velox_cursor Cursor.cpp)
 

@@ -918,6 +918,10 @@ FOLLY_ALWAYS_INLINE void varintSwitch(
   }
 }
 
+template void IntDecoder<true>::bulkRead<signed char>(
+    uint64_t size,
+    signed char* result);
+
 template <bool isSigned>
 template <typename T>
 void IntDecoder<isSigned>::bulkRead(uint64_t size, T* result) {
