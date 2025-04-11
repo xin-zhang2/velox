@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -g -O0")
+#set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS} -fsanitize=address -g -O0")
+
 add_subdirectory(utils)
 
 add_executable(
@@ -26,6 +29,7 @@ add_executable(
   MayHaveNullsRecursiveTest.cpp
   SelectivityVectorTest.cpp
   StringVectorBufferTest.cpp
+  PartitionedVectorTest.cpp
   VariantToVectorTest.cpp
   VectorCompareTest.cpp
   VectorEstimateFlatSizeTest.cpp

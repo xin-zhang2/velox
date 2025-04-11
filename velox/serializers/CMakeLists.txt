@@ -27,6 +27,7 @@ velox_add_library(
   CompactRowSerializer.cpp
   PrestoSerializer.cpp
   UnsafeRowSerializer.cpp
+  PartitioningSerializer.cpp
   PrestoBatchVectorSerializer.cpp
   PrestoHeader.cpp
   PrestoIterativeVectorSerializer.cpp
