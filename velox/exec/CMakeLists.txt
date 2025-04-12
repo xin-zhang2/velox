@@ -125,6 +125,7 @@ velox_link_libraries(
   velox_time
   velox_test_util
   velox_vector
+  xsimd
 )
 
 velox_add_library(velox_cursor Cursor.cpp)

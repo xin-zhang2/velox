@@ -536,6 +536,9 @@ void memset(void* to, char data, int32_t bytes, const A& = {});
 #define VELOX_WIDTH_DISPATCH(numBytes, TEMPLATE_FUNC, ...) \
   [&]() {                                                  \
     switch (numBytes) {                                    \
+      case 1: {                                            \
+        return TEMPLATE_FUNC<int8_t>(__VA_ARGS__);         \
+      }                                                    \
       case 2: {                                            \
         return TEMPLATE_FUNC<int16_t>(__VA_ARGS__);        \
       }                                                    \
