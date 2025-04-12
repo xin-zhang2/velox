@@ -180,9 +180,44 @@ class VectorHasher {
     decoded_.decode(vector, rows);
   }
 
+  void decode(const BaseVector& vector) {
+    VELOX_CHECK(
+        type_->kindEquals(vector.type()),
+        "Type mismatch: {} vs. {}",
+        type_->toString(),
+        vector.type()->toString());
+    decoded_.decode(vector);
+  }
+
   DecodedVector& decodedVector() {
     return decoded_;
   }
+
+  void xx64hash(bool mix, raw_vector<uint64_t>& result);
+
+  template <TypeKind Kind>
+  void xx64hashValues(bool mix, uint64_t* result);
+
+  template <typename T>
+  void xx64hashFlatValues(bool mix, uint64_t* result);
+
+  void hash(bool mix, raw_vector<uint64_t>& result);
+
+  template <TypeKind Kind>
+  void hashValues(bool mix, uint64_t* result);
+
+  template <typename T>
+  void hashFlatValues(bool mix, uint64_t* result);
+
+//  void hashNeon(bool mix, raw_vector<uint64_t>& result);
+//
+//  template <TypeKind Kind>
+//  void hashValuesNeon(bool mix, uint64_t* result);
+//
+//  template <typename T>
+//  void hashFlatValuesNeon(bool mix, uint64_t* result);
+
+  void hashPrecomputed(bool mix, raw_vector<uint64_t>& result) const;
 
   // Computes a hash for 'rows' in the vector previously decoded via decode()
   // call and stores it in 'result'. If 'mix' is true, mixes the hash with

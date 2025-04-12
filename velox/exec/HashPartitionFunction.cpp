@@ -32,6 +32,70 @@ static inline uint32_t localExchangeHash(uint32_t rawHash) {
 }
 } // namespace
 
+HashPartitionFunctionNew::HashPartitionFunctionNew(
+    int numPartitions,
+    const RowTypePtr& inputType,
+    const std::vector<column_index_t>& keyChannels,
+    const std::vector<VectorPtr>& constValues)
+    : numPartitions_{numPartitions} {
+  init(inputType, keyChannels, constValues);
+}
+
+void HashPartitionFunctionNew::init(
+    const RowTypePtr& inputType,
+    const std::vector<column_index_t>& keyChannels,
+    const std::vector<VectorPtr>& constValues) {
+  hashers_.reserve(keyChannels.size());
+  size_t constChannel{0};
+  for (const auto channel : keyChannels) {
+    if (channel != kConstantChannel) {
+      hashers_.emplace_back(
+          VectorHasher::create(inputType->childAt(channel), channel));
+    } else {
+      const auto& constValue = constValues[constChannel++];
+      hashers_.emplace_back(VectorHasher::create(constValue->type(), channel));
+      hashers_.back()->precompute(*constValue);
+    }
+  }
+}
+
+std::optional<uint32_t> HashPartitionFunctionNew::partition(
+    const RowVector& input,
+    std::vector<uint32_t>& partitions) {
+  if (hashers_.empty()) {
+    return 0u;
+  }
+
+  const auto size = input.size();
+  uint64_t mask = 0xFFFFFFFF;
+
+  hashes_.resize(size);
+  for (auto i = 0; i < hashers_.size(); ++i) {
+    auto& hasher = hashers_[i];
+    if (hasher->channel() != kConstantChannel) {
+      hasher->decode(*input.childAt(hasher->channel()));
+      hasher->hash(i > 0, hashes_);
+    } else {
+      hasher->hashPrecomputed(i > 0, hashes_);
+    }
+  }
+
+  partitions.resize(size);
+  if (hashBitRange_.has_value()) {
+    for (auto i = 0; i < size; ++i) {
+      partitions[i] = hashBitRange_->partition(hashes_[i]);
+    }
+  } else {
+    for (auto i = 0; i < size; ++i) {
+      //                partitions[i] = hashes_[i] % numPartitions_;
+      partitions[i] = ((hashes_[i] & mask) * numPartitions_) >> 32;
+      //                printf("%d ", partitions[i]);
+    }
+  }
+
+  return std::nullopt;
+}
+
 HashPartitionFunction::HashPartitionFunction(
     bool localExchange,
     int numPartitions,
@@ -124,8 +188,10 @@ std::optional<uint32_t> HashPartitionFunction::partition(
 std::unique_ptr<core::PartitionFunction> HashPartitionFunctionSpec::create(
     int numPartitions,
     bool localExchange) const {
-  return std::make_unique<exec::HashPartitionFunction>(
-      localExchange, numPartitions, inputType_, keyChannels_, constValues_);
+  //  return std::make_unique<exec::HashPartitionFunction>(
+  //      localExchange, numPartitions, inputType_, keyChannels_, constValues_);
+  return std::make_unique<exec::HashPartitionFunctionNew>(
+      numPartitions, inputType_, keyChannels_, constValues_);
 }
 
 std::string HashPartitionFunctionSpec::toString() const {
