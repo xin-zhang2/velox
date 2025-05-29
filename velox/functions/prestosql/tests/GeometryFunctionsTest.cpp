@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#ifdef VELOX_ENABLE_GEO
 #include <gtest/gtest.h>
 #include <array>
 #include "velox/common/base/Status.h"
@@ -2242,3 +2243,5 @@ TEST_F(GeometryFunctionsTest, testStEnvelope) {
       "GEOMETRYCOLLECTION (POINT (5 1), LINESTRING (3 4, 4 4))",
       "POLYGON ((3 1, 3 4, 5 4, 5 1, 3 1))");
 }
+
+#endif
