@@ -32,6 +32,28 @@
 #include "velox/vector/LazyVector.h"
 #include "velox/vector/SelectivityVector.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+// x86 includes
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__has_include)
+#if __has_include(<immintrin.h>)
+#include <immintrin.h>
+#endif
+#endif
+#endif
+
+// ARM NEON includes
+#if defined(__aarch64__)
+#if defined(__has_include)
+#if __has_include(<arm_neon.h>)
+#include <arm_neon.h>
+#endif
+#endif
+#endif
+
 namespace facebook::velox::exec {
 
 namespace {
@@ -798,6 +820,10 @@ void CastExpr::applyPeeled(
             fromType, toType, rows, context, input, result);
         break;
     }
+  } else if (
+      fromType->kind() == TypeKind::INTEGER &&
+      toType->kind() == TypeKind::BIGINT) {
+    result = applyIntegerToBigintCast(rows, toType, context, input);
   } else {
     switch (toType->kind()) {
       case TypeKind::MAP:
@@ -840,6 +866,148 @@ void CastExpr::applyPeeled(
   }
 }
 
+namespace {
+
+void castIntegerToBigintScalar(
+    const SelectivityVector& rows,
+    const int32_t* in,
+    int64_t* out) {
+  vector_size_t n = rows.end();
+  vector_size_t i = rows.begin();
+  for (; i + 4 <= n; i += 4) {
+    out[i] = static_cast<int64_t>(in[i]);
+    out[i + 1] = static_cast<int64_t>(in[i + 1]);
+    out[i + 2] = static_cast<int64_t>(in[i + 2]);
+    out[i + 3] = static_cast<int64_t>(in[i + 3]);
+  }
+  for (; i < n; ++i) {
+    out[i] = static_cast<int64_t>(in[i]);
+  }
+}
+
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__AVX2__)
+// If compiled with -mavx2, we can directly call AVX2 intrinsics.
+inline void castIntegerToBigintAvx2(
+    const SelectivityVector& rows,
+    const int32_t* in,
+    int64_t* out) {
+  vector_size_t n = rows.end();
+  vector_size_t i = rows.begin();
+  // Process 8 elements per iteration (two 128-bit loads -> cvtepi32_epi64
+  // twice)
+  for (; i + 8 <= n; i += 8) {
+    // Load 4 x int32.
+    __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + i));
+    // Next 4 x int32.
+    __m128i b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + i + 4));
+
+    // Converts 4x int32 -> 4x int64.
+    __m256i a64 = _mm256_cvtepi32_epi64(a);
+    __m256i b64 = _mm256_cvtepi32_epi64(b);
+
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(out + i), a64);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(out + i + 4), b64);
+  }
+
+  for (; i < n; ++i) {
+    out[i] = static_cast<int64_t>(in[i]);
+  }
+}
+#elif (defined(__x86_64__) || defined(_M_X64))
+// If we are on x86_64 but not compiled with -mavx2, we can detect at runtime
+// whether CPU supports avx2 (if compiler provides __builtin_cpu_supports).
+// Provide a runtime wrapper that uses scalar fallback unless avx2 runtime
+// detect is available.
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_cpu_supports)
+inline bool runtimeAvx2Supported() {
+  return __builtin_cpu_supports("avx2");
+}
+#else
+inline bool runtimeAvx2Supported() {
+  return false;
+}
+#endif
+#else
+inline bool runtimeAvx2Supported() {
+  return false;
+}
+#endif
+
+// If runtimeAvx2Supported returns true but we didn't compile with -mavx2,
+// we cannot call intrinsics compiled for AVX2. So safe approach: only use
+// AVX2 if compiled with __AVX2__ else fallback.
+inline void castIntegerToBigintAvx2(
+    const SelectivityVector& rows,
+    const int32_t* in,
+    int64_t* out) {
+  // No compiled AVX2 path; fallback to scalar.
+  castIntegerToBigintScalar(rows, in, out);
+}
+#endif
+
+// NEON implementation (aarch64).
+#if defined(__aarch64__) && defined(__ARM_NEON)
+inline void castIntegerToBigintNeon(
+    const SelectivityVector& rows,
+    const int32_t* in,
+    int64_t* out) {
+  vector_size_t n = rows.end();
+  vector_size_t i = rows.begin();
+  // We'll process 2 elements per loop (int64x2_t)
+  for (; i + 2 <= n; i += 2) {
+    // Load 2 x int32.
+    int32x2_t v32 = vld1_s32(in + i);
+    // Widen to int64x2_t.
+    int64x2_t v64 = vmovl_s32(v32);
+    // Store 2 x int64.
+    vst1q_s64(out + i, v64);
+  }
+  for (; i < n; ++i) {
+    out[i] = static_cast<int64_t>(in[i]);
+  }
+}
+#elif defined(__aarch64__)
+// If aarch64 but no NEON headers detected, fallback to scalar
+inline void castIntegerToBigintNeon(
+    const SelectivityVector& rows,
+    const int32_t* in,
+    int64_t* out) {
+  castIntegerToBigintScalar(rows, in, out);
+}
+#endif
+
+inline void castIntegerToBigintBatch(
+    const SelectivityVector& rows,
+    const int32_t* in,
+    int64_t* out) {
+  // Priority: x86 AVX2 (if compiled w/avx2) -> x86 runtime check (rare) ->
+  // aarch64 NEON -> scalar
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__AVX2__)
+  // Compiled AVX2: call it directly.
+  castIntegerToBigintAvx2(rows, in, out);
+  return;
+#else
+  // Not compiled with avx2: we may still have runtime detection (but cannot
+  // execute avx2 intrinsics unless compiled with -mavx2). So just use scalar
+  // (safe).
+  // Silence unused if not available.
+  (void)runtimeAvx2Supported;
+#endif
+#endif
+
+#if defined(__aarch64__)
+  castIntegerToBigintNeon(rows, in, out);
+  return;
+#endif
+
+  // Fallback scalar.
+  castIntegerToBigintScalar(rows, in, out);
+}
+
+} // namespace
+
 VectorPtr CastExpr::applyTimestampToVarcharCast(
     const TypePtr& toType,
     const SelectivityVector& rows,
@@ -876,6 +1044,43 @@ VectorPtr CastExpr::applyTimestampToVarcharCast(
   // Update the exact buffer size.
   buffer->setSize(rawBuffer - buffer->asMutable<char>());
   return result;
+}
+
+VectorPtr CastExpr::applyIntegerToBigintCast(
+    const SelectivityVector& rows,
+    const TypePtr& toType,
+    exec::EvalCtx& context,
+    const BaseVector& input) {
+  VectorPtr result;
+  context.ensureWritable(rows, toType, result);
+  (*result).clearNulls(rows);
+
+  if (input.isConstantEncoding()) {
+    auto constantInput = input.as<ConstantVector<int32_t>>();
+    if (constantInput->isNullAt(0)) {
+      return BaseVector::createNullConstant(toType, rows.end(), context.pool());
+    }
+    auto constantValue = static_cast<int64_t>(constantInput->valueAt(0));
+    return std::make_shared<ConstantVector<int64_t>>(
+        context.pool(),
+        rows.end(),
+        /*isNull=*/false,
+        toType,
+        std::move(constantValue));
+  }
+
+  if (input.isFlatEncoding()) {
+    const auto simpleInput = input.asFlatVector<int32_t>();
+    auto flatResult = result->asFlatVector<int64_t>();
+
+    const int32_t* in = simpleInput->rawValues<int32_t>();
+    int64_t* out = flatResult->mutableRawValues<int64_t>();
+
+    castIntegerToBigintBatch(rows, in, out);
+    return result;
+  }
+
+  VELOX_NYI("applyIntegerToBigintCast only supports constant or flat input");
 }
 
 template <typename TInput>
