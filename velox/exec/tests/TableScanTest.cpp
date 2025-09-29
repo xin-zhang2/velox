@@ -50,6 +50,8 @@
 #include "velox/type/Type.h"
 #include "velox/type/tests/SubfieldFiltersBuilder.h"
 
+#include <iostream>
+
 using namespace facebook::velox;
 using namespace facebook::velox::cache;
 using namespace facebook::velox::connector::hive;
@@ -6142,6 +6144,94 @@ TEST_F(TableScanTest, parallelUnitLoader) {
   auto stats = getTableScanRuntimeStats(task);
   // Verify that parallel unit loader is enabled.
   ASSERT_GT(stats.count("waitForUnitReadyNanos"), 0);
+}
+
+TEST_F(TableScanTest, result) {
+  auto input = makeFlatVector<int32_t>(
+      1'000,
+      [](auto i) { return 1 + 2 * i; },
+      [](auto i) { return i % 2 == 0; });
+  auto vector = makeRowVector({input});
+  auto filePath = TempFilePath::create();
+  writeToFile(filePath->getPath(), {vector});
+  createDuckDbTable({vector});
+
+  auto op = PlanBuilder()
+                .tableScan(ROW({"c0"}, {INTEGER()}))
+                .project({"CAST(c0 AS BIGINT)"})
+                .planNode();
+  assertQuery(op, {filePath}, "SELECT c0 FROM tmp");
+}
+
+auto filePath =
+    "/Users/rui/Downloads/velox-dev/velox/exec/tests/data/scan.dwrf";
+
+TEST_F(TableScanTest, scan) {
+  CursorParameters params;
+  params.planNode = tableScanNode(ROW({"c0"}, {INTEGER()}));
+  params.copyResult = false;
+  auto cursor = TaskCursor::create(params);
+  int64_t numRows = 0;
+  uint64_t readUs{0};
+  {
+    MicrosecondTimer timer(&readUs);
+    cursor->task()->addSplit("0", makeHiveSplit(filePath));
+    cursor->task()->noMoreSplits("0");
+    while (cursor->moveNext()) {
+      auto& vector = cursor->current();
+      numRows += vector->size();
+    }
+  }
+  std::cout << "Scan integer column: " << readUs << " us" << std::endl;
+  ASSERT_EQ(numRows, 300'000'000);
+}
+
+TEST_F(TableScanTest, castAsBigint) {
+  CursorParameters params;
+  params.planNode = PlanBuilder()
+                        .tableScan(ROW({"c0"}, {INTEGER()}))
+                        .project({"CAST(c0 AS BIGINT)"})
+                        .planNode();
+  params.copyResult = false;
+  auto cursor = TaskCursor::create(params);
+  int64_t numRows = 0;
+  uint64_t readUs{0};
+  {
+    MicrosecondTimer timer(&readUs);
+    cursor->task()->addSplit("0", makeHiveSplit(filePath));
+    cursor->task()->noMoreSplits("0");
+    while (cursor->moveNext()) {
+      auto& vector = cursor->current();
+      numRows += vector->size();
+    }
+  }
+  ASSERT_EQ(numRows, 300'000'000);
+  std::cout << "Scan and cast integer as bigint: " << readUs << " us"
+            << std::endl;
+}
+
+TEST_F(TableScanTest, castAsDecimal) {
+  CursorParameters params;
+  params.planNode = PlanBuilder()
+                        .tableScan(ROW({"c0"}, {INTEGER()}))
+                        .project({"CAST(c0 AS DECIMAL(38, 0))"})
+                        .planNode();
+  params.copyResult = false;
+  auto cursor = TaskCursor::create(params);
+  int64_t numRows = 0;
+  uint64_t readUs{0};
+  {
+    MicrosecondTimer timer(&readUs);
+    cursor->task()->addSplit("0", makeHiveSplit(filePath));
+    cursor->task()->noMoreSplits("0");
+    while (cursor->moveNext()) {
+      auto& vector = cursor->current();
+      numRows += vector->size();
+    }
+  }
+  ASSERT_EQ(numRows, 300'000'000);
+  std::cout << "Scan and cast integer as decimal: " << readUs << " us"
+            << std::endl;
 }
 
 } // namespace

@@ -798,6 +798,10 @@ void CastExpr::applyPeeled(
             fromType, toType, rows, context, input, result);
         break;
     }
+  } else if (
+      fromType->kind() == TypeKind::INTEGER &&
+      toType->kind() == TypeKind::BIGINT) {
+    result = applyIntegerToBigintCast(rows, toType, context, input);
   } else {
     switch (toType->kind()) {
       case TypeKind::MAP:
@@ -840,6 +844,37 @@ void CastExpr::applyPeeled(
   }
 }
 
+namespace {
+
+void castIntegerToBigintScalar(
+    const SelectivityVector& rows,
+    const int32_t* in,
+    int64_t* out) {
+  vector_size_t n = rows.end();
+  vector_size_t i = rows.begin();
+  for (; i + 4 <= n; i += 4) {
+    if (rows.isValid(i)) {
+      out[i] = static_cast<int64_t>(in[i]);
+    }
+    if (rows.isValid(i + 1)) {
+      out[i + 1] = static_cast<int64_t>(in[i + 1]);
+    }
+    if (rows.isValid(i + 2)) {
+      out[i + 2] = static_cast<int64_t>(in[i + 2]);
+    }
+    if (rows.isValid(i + 3)) {
+      out[i + 3] = static_cast<int64_t>(in[i + 3]);
+    }
+  }
+  for (; i < n; ++i) {
+    if (rows.isValid(i)) {
+      out[i] = static_cast<int64_t>(in[i]);
+    }
+  }
+}
+
+} // namespace
+
 VectorPtr CastExpr::applyTimestampToVarcharCast(
     const TypePtr& toType,
     const SelectivityVector& rows,
@@ -876,6 +911,44 @@ VectorPtr CastExpr::applyTimestampToVarcharCast(
   // Update the exact buffer size.
   buffer->setSize(rawBuffer - buffer->asMutable<char>());
   return result;
+}
+
+VectorPtr CastExpr::applyIntegerToBigintCast(
+    const SelectivityVector& rows,
+    const TypePtr& toType,
+    exec::EvalCtx& context,
+    const BaseVector& input) {
+  VectorPtr result;
+  context.ensureWritable(rows, toType, result);
+  (*result).clearNulls(rows);
+
+  if (input.isConstantEncoding()) {
+    auto constantInput = input.as<ConstantVector<int32_t>>();
+    if (constantInput->isNullAt(0)) {
+      return BaseVector::createNullConstant(toType, rows.end(), context.pool());
+    }
+    auto constantValue = static_cast<int64_t>(constantInput->valueAt(0));
+    return std::make_shared<ConstantVector<int64_t>>(
+        context.pool(),
+        rows.end(),
+        /*isNull=*/false,
+        toType,
+        std::move(constantValue));
+  }
+
+  if (input.isFlatEncoding()) {
+    const auto simpleInput = input.asFlatVector<int32_t>();
+    auto flatResult = result->asFlatVector<int64_t>();
+
+    const int32_t* in = simpleInput->rawValues<int32_t>();
+    int64_t* out = flatResult->mutableRawValues<int64_t>();
+
+    castIntegerToBigintScalar(rows, in, out);
+
+    return result;
+  }
+
+  VELOX_NYI("applyIntegerToBigintCast only supports constant or flat input");
 }
 
 template <typename TInput>
