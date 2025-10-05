@@ -587,7 +587,8 @@ std::unique_ptr<VectorSerde::Options> getVectorSerdeOptions(
     common::CompressionKind compressionKind,
     const std::string& kind,
     std::optional<float> minCompressionRatio,
-    int32_t minCompressionPageSizeBytes) {
+    int32_t minCompressionPageSizeBytes,
+    bool exchangeChecksum) {
   std::unique_ptr<VectorSerde::Options> options = kind == "Presto"
       ? std::make_unique<serializer::presto::PrestoVectorSerde::PrestoOptions>()
       : std::make_unique<VectorSerde::Options>();
@@ -596,6 +597,7 @@ std::unique_ptr<VectorSerde::Options> getVectorSerdeOptions(
     options->minCompressionRatio = minCompressionRatio.value();
   }
   options->minCompressionPageSizeBytes = minCompressionPageSizeBytes;
+  options->exchangeChecksum = exchangeChecksum;
   return options;
 }
 
