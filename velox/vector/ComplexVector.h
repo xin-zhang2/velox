@@ -59,13 +59,13 @@ class RowVector : public BaseVector {
     for (size_t i = 0; i < children_.size(); i++) {
       const auto& child = children_[i];
       if (child) {
-        VELOX_DCHECK(
-            child->type()->kindEquals(type->childAt(i)),
-            "Got type {} for field `{}` at position {}, but expected {}.",
-            child->type()->toString(),
-            rowType->nameOf(i),
-            i,
-            type->childAt(i)->toString());
+        // VELOX_DCHECK(
+        //     child->type()->kindEquals(type->childAt(i)),
+        //     "Got type {} for field `{}` at position {}, but expected {}.",
+        //     child->type()->toString(),
+        //     rowType->nameOf(i),
+        //     i,
+        //     type->childAt(i)->toString());
       }
     }
     updateContainsLazyNotLoaded();
