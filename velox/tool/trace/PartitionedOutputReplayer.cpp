@@ -53,9 +53,8 @@ std::vector<std::unique_ptr<folly::IOBuf>> getData(
            std::move(promise))](
           std::vector<std::unique_ptr<folly::IOBuf>> pages,
           int64_t /*inSequence*/,
-          std::vector<int64_t> /*remainingBytes*/) {
-        result->setValue(std::move(pages));
-      }));
+          std::vector<int64_t> /*remainingBytes*/,
+          int64_t /*totalNumRows*/) { result->setValue(std::move(pages)); }));
   auto future = std::move(semiFuture).via(executor);
   future.wait();
   VELOX_CHECK(future.isReady());

@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 #include "velox/exec/Exchange.h"
+
+#include <limits>
+
 #include "velox/common/Casts.h"
 #include "velox/common/serialization/Serializable.h"
 #include "velox/exec/OperatorUtils.h"
@@ -214,6 +217,31 @@ RowVectorPtr Exchange::getOutputFromColumnarPages(VectorSerde* serde) {
   VELOX_CHECK(
       inputStream_ == nullptr || columnarPageIdx_ < currentPages_.size());
 
+  uint64_t rowsToReserve = 0;
+  for (auto i = columnarPageIdx_; i < currentPages_.size(); ++i) {
+    const auto pageRows = currentPages_[i]->numRows();
+    if (!pageRows.has_value() || pageRows.value() <= 0) {
+      rowsToReserve = numRows;
+      break;
+    }
+    const auto rowsInPage = static_cast<uint64_t>(pageRows.value());
+    rowsToReserve = rowsInPage >= numRows - rowsToReserve
+        ? numRows
+        : rowsToReserve + rowsInPage;
+    if (rowsToReserve == numRows) {
+      break;
+    }
+  }
+  if (rowsToReserve == 0) {
+    rowsToReserve = numRows;
+  }
+
+  VELOX_CHECK_LE(
+      rowsToReserve,
+      static_cast<uint64_t>(std::numeric_limits<vector_size_t>::max()));
+  prepareResultVector(static_cast<vector_size_t>(rowsToReserve));
+  result_->resize(0);
+
   // Iterate through pages
   while (columnarPageIdx_ < currentPages_.size()) {
     auto& page = currentPages_[columnarPageIdx_];
@@ -227,6 +255,8 @@ RowVectorPtr Exchange::getOutputFromColumnarPages(VectorSerde* serde) {
       inputStream_ = page->prepareStreamForDeserialize();
     }
 
+    result_->resize(resultOffset);
+
     // Inner loop: deserialize vectors from current page until batch is full
     // or page is exhausted.
     while (!inputStream_->atEnd() && resultOffset < numRows) {
@@ -237,8 +267,6 @@ RowVectorPtr Exchange::getOutputFromColumnarPages(VectorSerde* serde) {
           &result_,
           resultOffset,
           serdeOptions_.get());
-
-      resultOffset = result_->size();
     }
 
     if (inputStream_->atEnd()) {
@@ -248,7 +276,6 @@ RowVectorPtr Exchange::getOutputFromColumnarPages(VectorSerde* serde) {
       ++columnarPageIdx_;
     }
 
-    // Stop if accumulated enough rows for this batch.
     if (resultOffset >= numRows) {
       break;
     }
@@ -389,6 +416,21 @@ void Exchange::recordExchangeClientStats() {
 
 VectorSerde* Exchange::getSerde() {
   return getNamedVectorSerde(serdeKind_);
+}
+
+void Exchange::prepareResultVector(vector_size_t numRows) {
+  if (result_ && result_.use_count() == 1) {
+    VELOX_CHECK(
+        *result_->type() == *outputType_,
+        "Unexpected type: {} vs. {}",
+        result_->type()->toString(),
+        outputType_->toString());
+    result_->prepareForReuse();
+    result_->resize(numRows);
+    return;
+  }
+
+  result_ = BaseVector::create<RowVector>(outputType_, numRows, pool());
 }
 
 } // namespace facebook::velox::exec

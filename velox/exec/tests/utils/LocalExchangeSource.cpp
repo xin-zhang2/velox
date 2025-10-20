@@ -65,7 +65,8 @@ class LocalExchangeSource : public exec::ExchangeSource {
     auto resultCallback = [self, requestedSequence, buffers, this](
                               std::vector<std::unique_ptr<folly::IOBuf>> data,
                               int64_t sequence,
-                              std::vector<int64_t> remainingBytes) {
+                              std::vector<int64_t> remainingBytes,
+                              int64_t totalNumRows) {
       {
         std::lock_guard<std::mutex> l(mutex_);
         // This function is called either for a result or timeout. Only the
@@ -90,22 +91,32 @@ class LocalExchangeSource : public exec::ExchangeSource {
       if (data.empty()) {
         sequence = requestedSequence;
       }
-      std::vector<std::unique_ptr<SerializedPageBase>> pages;
+
       bool atEnd = false;
       int64_t totalBytes = 0;
-      for (auto& inputPage : data) {
-        if (!inputPage) {
+      int64_t numIOBufs = data.size();
+      std::unique_ptr<folly::IOBuf> singleChain;
+      for (auto& iobuf : data) {
+        if (!iobuf) {
           atEnd = true;
           // Keep looping, there could be extra end markers.
           continue;
         }
-        totalBytes += inputPage->length();
-        inputPage->unshare();
-        pages.push_back(
-            std::make_unique<PrestoSerializedPage>(std::move(inputPage)));
-        inputPage = nullptr;
+
+        totalBytes += iobuf->capacity();
+        if (singleChain == nullptr) {
+          singleChain = std::move(iobuf);
+        } else {
+          singleChain->appendToChain(std::move(iobuf));
+        }
       }
-      numPages_ += pages.size();
+
+      std::unique_ptr<SerializedPageBase> serializedPage;
+      if (!singleChain) {
+        serializedPage = std::make_unique<PrestoSerializedPage>(
+            std::move(singleChain), nullptr, totalNumRows);
+      }
+
       totalBytes_ += totalBytes;
       if (data.empty()) {
         common::testutil::TestValue::adjust(
@@ -128,15 +139,15 @@ class LocalExchangeSource : public exec::ExchangeSource {
           std::lock_guard<std::mutex> l(queue_->mutex());
           requestPending_ = false;
           requestPromise = std::move(promise_);
-          for (auto& page : pages) {
-            queue_->enqueueLocked(std::move(page), queuePromises);
+          if (serializedPage) {
+            queue_->enqueueLocked(std::move(serializedPage), queuePromises);
           }
           if (atEnd) {
             queue_->enqueueLocked(nullptr, queuePromises);
             atEnd_ = true;
           }
           if (!data.empty()) {
-            sequence_ = sequence + pages.size();
+            sequence_ = sequence + numIOBufs;
           }
         }
         for (auto& promise : queuePromises) {
@@ -149,7 +160,8 @@ class LocalExchangeSource : public exec::ExchangeSource {
       }
 
       if (!requestPromise.isFulfilled()) {
-        requestPromise.setValue(Response{totalBytes, atEnd_, remainingBytes});
+        requestPromise.setValue(
+            Response{totalBytes, atEnd_, remainingBytes, totalNumRows});
       }
     };
 
@@ -240,7 +252,8 @@ class LocalExchangeSource : public exec::ExchangeSource {
   using ResultCallback = std::function<void(
       std::vector<std::unique_ptr<folly::IOBuf>> data,
       int64_t sequence,
-      std::vector<int64_t> remainingBytes)>;
+      std::vector<int64_t> remainingBytes,
+      int64_t totalNumRows)>;
 
   static void registerTimeout(
       const std::shared_ptr<ExchangeSource>& self,
@@ -265,7 +278,7 @@ class LocalExchangeSource : public exec::ExchangeSource {
           }
           if (callback) {
             // Outside of mutex.
-            callback({}, 0, {});
+            callback({}, 0, {}, 0);
             continue;
           }
           std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -287,7 +300,7 @@ class LocalExchangeSource : public exec::ExchangeSource {
       promise = std::move(promise_);
     }
     if (promise.valid() && !promise.isFulfilled()) {
-      promise.setValue(Response{0, false, {}});
+      promise.setValue(Response{0, false, {}, std::nullopt});
       return true;
     }
 

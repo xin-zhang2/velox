@@ -335,7 +335,7 @@ class VectorSerde {
       velox::memory::MemoryPool* pool,
       RowTypePtr type,
       RowVectorPtr* result,
-      vector_size_t resultOffset,
+      vector_size_t& resultOffset,
       const Options* options = nullptr) {
     VELOX_UNSUPPORTED();
   }

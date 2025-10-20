@@ -28,7 +28,8 @@ namespace facebook::velox::exec {
 using DataAvailableCallback = std::function<void(
     std::vector<std::unique_ptr<folly::IOBuf>> pages,
     int64_t sequence,
-    std::vector<int64_t> remainingBytes)>;
+    std::vector<int64_t> remainingBytes,
+    int64_t totalNumRows)>;
 
 /// Callback provided to indicate if the consumer of a destination buffer is
 /// currently active or not. It is used by arbitrary output buffer to optimize
@@ -45,10 +46,11 @@ struct DataAvailable {
   int64_t sequence{0};
   std::vector<std::unique_ptr<folly::IOBuf>> data;
   std::vector<int64_t> remainingBytes;
+  int64_t totalNumRows{0};
 
   void notify() {
     if (callback) {
-      callback(std::move(data), sequence, remainingBytes);
+      callback(std::move(data), sequence, remainingBytes, totalNumRows);
     }
   }
 };
@@ -135,6 +137,9 @@ class DestinationBuffer {
   struct Data {
     /// The actual data available at this buffer.
     std::vector<std::unique_ptr<folly::IOBuf>> data;
+
+    // The total number of rows in data pages.
+    int64_t totalNumRows;
 
     /// The byte sizes of pages that can be fetched.
     std::vector<int64_t> remainingBytes;

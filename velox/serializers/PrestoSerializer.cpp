@@ -138,7 +138,7 @@ void PrestoVectorSerde::deserialize(
     velox::memory::MemoryPool* pool,
     RowTypePtr type,
     RowVectorPtr* result,
-    vector_size_t resultOffset,
+    vector_size_t& resultOffset,
     const Options* options) {
   const auto prestoOptions = toPrestoOptions(options);
   const auto codec =
@@ -179,9 +179,6 @@ void PrestoVectorSerde::deserialize(
     *result = BaseVector::create<RowVector>(type, header.numRows, pool);
   }
 
-  VELOX_CHECK_EQ(
-      header.checksum, actualCheckSum, "Received corrupted serialized page.");
-
   if (!detail::isCompressedBitSet(header.pageCodecMarker)) {
     detail::readTopColumns(
         *source, type, pool, *result, resultOffset, prestoOptions);
@@ -198,6 +195,8 @@ void PrestoVectorSerde::deserialize(
     detail::readTopColumns(
         *uncompressedSource, type, pool, *result, resultOffset, prestoOptions);
   }
+
+  resultOffset += header.numRows;
 }
 
 void PrestoVectorSerde::deserializeSingleColumn(

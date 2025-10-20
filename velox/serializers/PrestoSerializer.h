@@ -133,7 +133,8 @@ class PrestoVectorSerde : public VectorSerde {
       RowTypePtr type,
       RowVectorPtr* result,
       const Options* options) override {
-    return deserialize(source, pool, type, result, 0, options);
+    vector_size_t resultOffset = 0;
+    return deserialize(source, pool, type, result, resultOffset, options);
   }
 
   void deserialize(
@@ -141,7 +142,7 @@ class PrestoVectorSerde : public VectorSerde {
       velox::memory::MemoryPool* pool,
       RowTypePtr type,
       RowVectorPtr* result,
-      vector_size_t resultOffset,
+      vector_size_t& resultOffset,
       const Options* options) override;
 
   /// This function is used to deserialize a single column that is serialized in

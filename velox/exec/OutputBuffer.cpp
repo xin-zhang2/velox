@@ -133,7 +133,7 @@ DestinationBuffer::Data DestinationBuffer::getData(
         arbitraryBuffer->getAvailablePageSizes(remainingBytes);
       }
       if (!remainingBytes.empty()) {
-        return {{}, std::move(remainingBytes), true};
+        return {{}, 0, std::move(remainingBytes), true};
       }
     }
     notify_ = std::move(notify);
@@ -149,6 +149,7 @@ DestinationBuffer::Data DestinationBuffer::getData(
 
   std::vector<std::unique_ptr<folly::IOBuf>> data;
   uint64_t resultBytes = 0;
+  int64_t resultRows = 0;
   auto i = sequence - sequence_;
   if (maxBytes > 0) {
     for (; i < data_.size(); ++i) {
@@ -158,8 +159,10 @@ DestinationBuffer::Data DestinationBuffer::getData(
         data.push_back(nullptr);
         break;
       }
+      // getIOBuf() would clone the IOBuf to avoid ownership issues.
       data.push_back(data_[i]->getIOBuf());
       resultBytes += data_[i]->size();
+      resultRows += data_[i]->numRows().value_or(0);
       if (resultBytes >= maxBytes) {
         ++i;
         break;
@@ -183,7 +186,7 @@ DestinationBuffer::Data DestinationBuffer::getData(
   if (data.empty() && remainingBytes.empty() && atEnd) {
     data.push_back(nullptr);
   }
-  return {std::move(data), std::move(remainingBytes), true};
+  return {std::move(data), resultRows, std::move(remainingBytes), true};
 }
 
 void DestinationBuffer::enqueue(std::shared_ptr<SerializedPageBase> data) {
@@ -209,6 +212,7 @@ DataAvailable DestinationBuffer::getAndClearNotify() {
   auto data = getData(notifyMaxBytes_, notifySequence_, nullptr, nullptr);
   result.data = std::move(data.data);
   result.remainingBytes = std::move(data.remainingBytes);
+  result.totalNumRows = data.totalNumRows;
   clearNotify();
   return result;
 }
@@ -743,7 +747,11 @@ void OutputBuffer::getData(
   }
   releaseAfterAcknowledge(freed, promises);
   if (data.immediate) {
-    notify(std::move(data.data), sequence, std::move(data.remainingBytes));
+    notify(
+        std::move(data.data),
+        sequence,
+        std::move(data.remainingBytes),
+        data.totalNumRows);
   }
 }
 
