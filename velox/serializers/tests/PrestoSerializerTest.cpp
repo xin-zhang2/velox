@@ -257,8 +257,14 @@ class PrestoSerializerTest
       validateLexer(input, paramOptions);
     }
     RowVectorPtr result;
+    vector_size_t resultOffset = 0;
     serde_->deserialize(
-        byteStream.get(), pool_.get(), rowType, &result, 0, &paramOptions);
+        byteStream.get(),
+        pool_.get(),
+        rowType,
+        &result,
+        resultOffset,
+        &paramOptions);
     return result;
   }
 
@@ -513,26 +519,39 @@ class PrestoSerializerTest
     for (auto pieceIdx = 0; pieceIdx < pieces.size(); ++pieceIdx) {
       auto piece = pieces[pieceIdx];
       auto byteStream = toByteStream(piece);
+      auto resultOffset = deserialized->size();
       serde_->deserialize(
           byteStream.get(),
           pool_.get(),
           rowType,
           &deserialized,
-          deserialized->size(),
+          resultOffset,
           &paramOptions);
 
       RowVectorPtr single =
           BaseVector::create<RowVector>(rowType, 0, pool_.get());
       byteStream = toByteStream(piece);
+      resultOffset = 0;
       serde_->deserialize(
-          byteStream.get(), pool_.get(), rowType, &single, 0, &paramOptions);
+          byteStream.get(),
+          pool_.get(),
+          rowType,
+          &single,
+          resultOffset,
+          &paramOptions);
       assertEqualVectors(single->childAt(0), vectors[pieceIdx]);
 
       RowVectorPtr single2 =
           BaseVector::create<RowVector>(rowType, 0, pool_.get());
       byteStream = toByteStream(reusedPieces[pieceIdx]);
+      resultOffset = 0;
       serde_->deserialize(
-          byteStream.get(), pool_.get(), rowType, &single2, 0, &paramOptions);
+          byteStream.get(),
+          pool_.get(),
+          rowType,
+          &single2,
+          resultOffset,
+          &paramOptions);
       assertEqualVectors(single2->childAt(0), vectors[pieceIdx]);
     }
     assertEqualVectors(concatenation, deserialized);
@@ -1126,12 +1145,13 @@ TEST_P(PrestoSerializerTest, multiPage) {
 
   for (int i = 0; i < testVectors.size(); i++) {
     RowVectorPtr& vec = testVectors[i];
+    vector_size_t resultOffset = 0;
     serde_->deserialize(
         byteStream.get(),
         pool_.get(),
         rowType,
         &deserialized,
-        0,
+        resultOffset,
         &paramOptions);
     if (i < testVectors.size() - 1) {
       ASSERT_FALSE(byteStream->atEnd());
@@ -1758,13 +1778,14 @@ TEST_P(PrestoSerializerTest, checksum) {
   // OOM.
   auto pool = memory::memoryManager()->addRootPool("checksum", 1UL << 10);
   // This should fail because the checksums don't match.
+  vector_size_t resultOffset = 0;
   VELOX_ASSERT_THROW(
       serde_->deserialize(
           byteStream.get(),
           pool->addLeafChild("child").get(),
           ROW({BIGINT()}),
           &result,
-          0,
+          resultOffset,
           &paramOptions),
       "Received corrupted serialized page.");
 }

@@ -207,9 +207,8 @@ class OptimizedPartitionedOutputTest : public OperatorTestBase {
              std::move(promise))](
             std::vector<std::unique_ptr<folly::IOBuf>> pages,
             int64_t /*sequence*/,
-            std::vector<int64_t> /*remainingBytes*/) {
-          result->setValue(std::move(pages));
-        }));
+            std::vector<int64_t> /*remainingBytes*/,
+            int64_t /*totalNumRows*/) { result->setValue(std::move(pages)); }));
     auto future = std::move(semiFuture).via(executor_.get());
     future.wait(std::chrono::seconds{10});
     VELOX_CHECK(future.isReady());
@@ -248,7 +247,9 @@ class OptimizedPartitionedOutputTest : public OperatorTestBase {
         std::make_unique<BufferInputStream>(std::move(byteRanges));
     serializer::presto::PrestoVectorSerde serde;
     RowVectorPtr result;
-    serde.deserialize(byteStream.get(), pool(), rowType, &result, 0, nullptr);
+    vector_size_t resultOffset = 0;
+    serde.deserialize(
+        byteStream.get(), pool(), rowType, &result, resultOffset, nullptr);
     return result;
   }
 

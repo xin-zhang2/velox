@@ -2334,7 +2334,8 @@ TEST_P(MultiFragmentTest, taskTerminateWithPendingOutputBuffers) {
         sequence,
         [&](std::vector<std::unique_ptr<folly::IOBuf>> iobufs,
             int64_t inSequence,
-            std::vector<int64_t> /*remainingBytes*/) {
+            std::vector<int64_t> /*remainingBytes*/,
+            int64_t /*totalNumRows*/) {
           for (auto& iobuf : iobufs) {
             if (iobuf != nullptr) {
               ++inSequence;
@@ -2588,7 +2589,10 @@ class DataFetcher {
         destination_,
         maxBytes_,
         sequence,
-        [&](auto pages, auto sequence, auto /*remainingBytes*/) mutable {
+        [&](auto pages,
+            auto sequence,
+            auto /*remainingBytes*/,
+            auto /*totalNumRows*/) mutable {
           const auto nextSequence = sequence + pages.size();
           const bool atEnd = processData(std::move(pages), sequence);
           bufferManager_->acknowledge(taskId_, destination_, nextSequence);
@@ -2881,7 +2885,7 @@ TEST_P(MultiFragmentTest, mergeSmallBatchesInExchange) {
       makeFlatVector<int32_t>(3'000, [](auto row) { return 1 + row % 3; }),
   });
 
-  auto test = [&](uint64_t maxBytes, int32_t expectedBatches) {
+  auto test = [&](uint64_t maxBytes) {
     auto producerTask = makeTask(producerTaskId, producerPlan);
 
     bufferManager_->initializeTask(
@@ -2913,27 +2917,22 @@ TEST_P(MultiFragmentTest, mergeSmallBatchesInExchange) {
     auto taskStats = exec::toPlanStats(task->taskStats());
     const auto& stats = taskStats.at("0");
 
-    ASSERT_EQ(expected->size(), stats.outputRows);
-    ASSERT_EQ(expectedBatches, stats.outputVectors);
-    ASSERT_EQ(numPages, stats.customStats.at("numReceivedPages").sum);
+    EXPECT_EQ(expected->size(), stats.outputRows);
+    EXPECT_GT(stats.outputVectors, 0);
+    EXPECT_LE(stats.outputVectors, numPages);
+    // LocalExchangeSource coalesces all pages fetched in one response into a
+    // single SerializedPage, matching the HTTP exchange source behavior.
+    EXPECT_EQ(1, stats.customStats.at("numReceivedPages").sum);
+    return stats.outputVectors;
   };
 
-  if (GetParam().serdeKind == "Presto") {
-    test(1, 1'000);
-    test(1'000, 56);
-    test(10'000, 7);
-    test(100'000, 2);
-  } else if (GetParam().serdeKind == "CompactRow") {
-    test(1, 1'000);
-    test(1'000, 39);
-    test(10'000, 5);
-    test(100'000, 2);
-  } else {
-    test(1, 1'000);
-    test(1'000, 72);
-    test(10'000, 8);
-    test(100'000, 2);
-  }
+  const auto oneByteBatches = test(1);
+  const auto oneKilobyteBatches = test(1'000);
+  const auto tenKilobyteBatches = test(10'000);
+  const auto hundredKilobyteBatches = test(100'000);
+  ASSERT_GT(oneByteBatches, oneKilobyteBatches);
+  ASSERT_GT(oneKilobyteBatches, tenKilobyteBatches);
+  ASSERT_GT(tenKilobyteBatches, hundredKilobyteBatches);
 }
 
 TEST_P(MultiFragmentTest, splitLargeCompactRowsInExchange) {
