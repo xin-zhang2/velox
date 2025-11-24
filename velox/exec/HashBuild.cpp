@@ -403,7 +403,10 @@ void HashBuild::addInput(RowVectorPtr input) {
   }
 
   activeRows_.applyToSelected([&](auto rowIndex) {
-    char* newRow = rows->newRow();
+    char* newRow = rows->newRowTest(
+        operatorCtx_->driverCtx()->queryConfig().hashTableMinPages(),
+        operatorCtx_->driverCtx()->queryConfig().hashTableHugePageThreshold(),
+        operatorCtx_->driverCtx()->queryConfig().hashTableHugePageNums());
     if (nextOffset) {
       *reinterpret_cast<char**>(newRow + nextOffset) = nullptr;
     }

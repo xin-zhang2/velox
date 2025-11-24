@@ -739,6 +739,12 @@ class QueryConfig {
   /// estimates.
   static constexpr const char* kRowSizeTrackingMode = "row_size_tracking_mode";
 
+  static constexpr const char* kHashTableMinPages = "hashtable_min_pages";
+  static constexpr const char* kHashTableHugePageThreshold =
+      "hashtable_huge_page_threshold";
+  static constexpr const char* kHashTableHugePageNums =
+      "hashtable_huge_page_nums";
+
   enum class RowSizeTrackingMode {
     DISABLED = 0,
     EXCLUDE_DELTA_SPLITS = 1,
@@ -1327,6 +1333,20 @@ class QueryConfig {
 
   std::string source() const {
     return get<std::string>(kSource, "");
+  }
+
+  int32_t hashTableMinPages() const {
+    return get<int32_t>(kHashTableMinPages, 16);
+  }
+
+  int32_t hashTableHugePageNums() const {
+    return get<int32_t>(kHashTableHugePageNums, 16);
+  }
+
+  int64_t hashTableHugePageThreshold() const {
+    return config::toCapacity(
+        get<std::string>(kHashTableHugePageThreshold, "256KB"),
+        config::CapacityUnit::BYTE);
   }
 
   std::string clientTags() const {

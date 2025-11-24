@@ -27,6 +27,7 @@ namespace facebook::velox::memory {
 class AllocationPool {
  public:
   static constexpr int32_t kMinPages = 16;
+  static constexpr int64_t kDefaultHugePageThreshold = 256 * 1024;
 
   explicit AllocationPool(memory::MemoryPool* pool) : pool_(pool) {}
 
@@ -39,6 +40,13 @@ class AllocationPool {
   // Allocate a buffer from this pool, optionally aligned.  The alignment can
   // only be power of 2.
   char* allocateFixed(uint64_t bytes, int32_t alignment = 1);
+
+  char* allocateFixedTest(
+      int64_t bytes,
+      int32_t alignment = 1,
+      int32_t minPages = kMinPages,
+      int64_t hugePageThreshold = kDefaultHugePageThreshold,
+      int32_t hugePageNums = 16);
 
   // Starts a new run for variable length allocation. The actual size
   // is at least one machine page. Throws std::bad_alloc if no space.
@@ -109,7 +117,6 @@ class AllocationPool {
   }
 
  private:
-  static constexpr int64_t kDefaultHugePageThreshold = 256 * 1024;
   static constexpr int64_t kMaxMmapBytes = 512 << 20; // 512 MB
 
   // Returns the offset from 'startOfRun_' after which the last large
@@ -136,6 +143,11 @@ class AllocationPool {
   void maybeGrowLastAllocation(uint64_t bytesRequested);
 
   void newRunImpl(memory::MachinePageCount numPages);
+  void newRunImplTest(
+      memory::MachinePageCount numPages,
+      int32_t minPages,
+      int64_t hugePageThreshold,
+      int32_t hugePageNums);
 
   memory::MemoryPool* pool_;
   std::vector<memory::Allocation> allocations_;
