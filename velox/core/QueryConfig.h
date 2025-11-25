@@ -739,6 +739,14 @@ class QueryConfig {
   /// estimates.
   static constexpr const char* kRowSizeTrackingMode = "row_size_tracking_mode";
 
+  /// The memory allocation unit size for HashTable operations.
+  /// It controls the page size used when allocating memory for hash table rows.
+  /// The value must be 2^n bytes between 4KB and 2MB.
+  /// The default value 4KB aligns with the standard machine page size used
+  /// throughout Velox's memory management.
+  /// This is an experimental property for performance tuning.
+  static constexpr const char* kHashTablePageSize = "hashtable_page_size";
+
   enum class RowSizeTrackingMode {
     DISABLED = 0,
     EXCLUDE_DELTA_SPLITS = 1,
@@ -1323,6 +1331,12 @@ class QueryConfig {
 
   int32_t maxNumSplitsListenedTo() const {
     return get<int32_t>(kMaxNumSplitsListenedTo, 0);
+  }
+
+  uint64_t hashTablePageSize() const {
+    return config::toCapacity(
+        get<std::string>(kHashTablePageSize, "4KB"),
+        config::CapacityUnit::BYTE);
   }
 
   std::string source() const {

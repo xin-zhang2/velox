@@ -332,7 +332,8 @@ char* HashTable<ignoreNullKeys>::insertEntry(
     HashLookup& lookup,
     uint64_t index,
     vector_size_t row) {
-  char* group = rows_->newRow();
+  char* group = rows_->newRowTest(
+      driverThreadContext()->driverCtx()->queryConfig().hashTablePageSize());
   lookup.hits[row] = group; // NOLINT
   storeKeys(lookup, row);
   storeRowPointer(index, lookup.hashes[row], group);

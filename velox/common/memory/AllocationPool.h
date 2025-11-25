@@ -40,6 +40,11 @@ class AllocationPool {
   // only be power of 2.
   char* allocateFixed(uint64_t bytes, int32_t alignment = 1);
 
+  char* allocateFixedWithPageSize(
+      int64_t bytes,
+      int32_t alignment,
+      uint64_t pageSize);
+
   // Starts a new run for variable length allocation. The actual size
   // is at least one machine page. Throws std::bad_alloc if no space.
   void newRun(int64_t preferredSize);
@@ -136,6 +141,10 @@ class AllocationPool {
   void maybeGrowLastAllocation(uint64_t bytesRequested);
 
   void newRunImpl(memory::MachinePageCount numPages);
+
+  void newRunImplWithPageSize(
+      memory::MachinePageCount numPages,
+      uint64_t pageSize);
 
   memory::MemoryPool* pool_;
   std::vector<memory::Allocation> allocations_;
