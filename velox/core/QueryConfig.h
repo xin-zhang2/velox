@@ -747,6 +747,14 @@ class QueryConfig {
   /// This is an experimental property for performance tuning.
   static constexpr const char* kHashTablePageSize = "hashtable_page_size";
 
+  static constexpr const char* kHashTableMinPages = "hashtable_min_pages";
+
+  static constexpr const char* kHashTableHugePageThreshold =
+      "hashtable_huge_page_threshold";
+
+  static constexpr const char* kHashTableHugePageNums =
+      "hashtable_huge_page_nums";
+
   enum class RowSizeTrackingMode {
     DISABLED = 0,
     EXCLUDE_DELTA_SPLITS = 1,
@@ -1335,7 +1343,21 @@ class QueryConfig {
 
   uint64_t hashTablePageSize() const {
     return config::toCapacity(
-        get<std::string>(kHashTablePageSize, "4KB"),
+        get<std::string>(kHashTablePageSize, "4kB"),
+        config::CapacityUnit::BYTE);
+  }
+
+  int32_t hashTableMinPages() const {
+    return get<int32_t>(kHashTableMinPages, 16);
+  }
+
+  int32_t hashTableHugePageNums() const {
+    return get<int32_t>(kHashTableHugePageNums, 16);
+  }
+
+  int64_t hashTableHugePageThreshold() const {
+    return config::toCapacity(
+        get<std::string>(kHashTableHugePageThreshold, "256kB"),
         config::CapacityUnit::BYTE);
   }
 

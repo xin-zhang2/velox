@@ -76,10 +76,13 @@ char* AllocationPool::allocateFixed(uint64_t bytes, int32_t alignment) {
   return result;
 }
 
-char* AllocationPool::allocateFixedWithPageSize(
+char* AllocationPool::allocateFixedTest(
     int64_t bytes,
     int32_t alignment,
-    uint64_t pageSize) {
+    uint64_t pageSize,
+    int32_t minPages,
+    int64_t hugePageThreshold,
+    int32_t hugePageNums) {
   VELOX_CHECK_GT(bytes, 0, "Cannot allocate zero bytes");
   if (freeAddressableBytes() >= bytes && alignment == 1) {
     auto* result = startOfRun_ + currentOffset_;
@@ -99,11 +102,13 @@ char* AllocationPool::allocateFixedWithPageSize(
   auto numPages = bits::roundUp(bytes + alignment - 1, pageSize) / pageSize;
 
   if (freeAddressableBytes() == 0) {
-    newRunImplWithPageSize(numPages, pageSize);
+    newRunImplWithPageSize(
+        numPages, pageSize, minPages, hugePageThreshold, hugePageNums);
   } else {
     auto alignedBytes = bytes + alignmentPadding(firstFreeInRun(), alignment);
     if (freeAddressableBytes() < alignedBytes) {
-      newRunImplWithPageSize(numPages, pageSize);
+      newRunImplWithPageSize(
+          numPages, pageSize, minPages, hugePageThreshold, hugePageNums);
     }
   }
   currentOffset_ += alignmentPadding(firstFreeInRun(), alignment);
@@ -180,8 +185,11 @@ void AllocationPool::newRunImpl(MachinePageCount numPages) {
 
 void AllocationPool::newRunImplWithPageSize(
     memory::MachinePageCount numPages,
-    uint64_t pageSize) {
-  if (usedBytes_ >= hugePageThreshold_ ||
+    const uint64_t pageSize,
+    int32_t minPages,
+    int64_t hugePageThreshold,
+    int32_t hugePageNum) {
+  if (usedBytes_ >= hugePageThreshold ||
       numPages > pool_->sizeClasses().back()) {
     // At least 16 huge pages, no more than kMaxMmapBytes. The next is
     // double the previous. Because the previous is a hair under the
@@ -190,7 +198,7 @@ void AllocationPool::newRunImplWithPageSize(
     int64_t nextSize = std::min(
         kMaxMmapBytes,
         std::max<int64_t>(
-            16 * AllocationTraits::kHugePageSize,
+            hugePageNum * AllocationTraits::kHugePageSize,
             bits::nextPowerOfTwo(
                 usedBytes_ + AllocationTraits::kHugePageSize)));
     // Round 'numPages' to no of pages in huge page. Allocating this plus an
@@ -220,9 +228,7 @@ void AllocationPool::newRunImplWithPageSize(
   }
 
   Allocation allocation;
-  const auto roundedBytes = std::max<uint64_t>(
-      kMinPages * AllocationTraits::kPageSize, numPages * pageSize);
-  const auto roundedPages = bits::roundUp(roundedBytes, pageSize) / pageSize;
+  const auto roundedPages = std::max<int32_t>(minPages, numPages);
   const auto standardPages =
       (roundedPages * pageSize) / AllocationTraits::kPageSize;
   pool_->allocateNonContiguous(standardPages, allocation, standardPages);

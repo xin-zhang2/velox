@@ -283,7 +283,11 @@ char* RowContainer::newRow() {
   return initializeRow(row, false /* reuse */);
 }
 
-char* RowContainer::newRowTest(uint64_t pageSize) {
+char* RowContainer::newRowTest(
+    uint64_t pageSize,
+    int32_t minPages,
+    int64_t hugePageThreshold,
+    int32_t hugePageNums) {
   VELOX_DCHECK(mutable_, "Can't add row into an immutable row container");
   ++numRows_;
   char* row;
@@ -293,8 +297,13 @@ char* RowContainer::newRowTest(uint64_t pageSize) {
     firstFreeRow_ = nextFree(row);
     --numFreeRows_;
   } else {
-    row = rows_.allocateFixedWithPageSize(
-              fixedRowSize_ + normalizedKeySize_, alignment_, pageSize) +
+    row = rows_.allocateFixedTest(
+              fixedRowSize_ + normalizedKeySize_,
+              alignment_,
+              pageSize,
+              minPages,
+              hugePageThreshold,
+              hugePageNums) +
         normalizedKeySize_;
     if (normalizedKeySize_) {
       ++numRowsWithNormalizedKey_;

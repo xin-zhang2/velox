@@ -332,8 +332,12 @@ char* HashTable<ignoreNullKeys>::insertEntry(
     HashLookup& lookup,
     uint64_t index,
     vector_size_t row) {
+  const auto& queryConfig = driverThreadContext()->driverCtx()->queryConfig();
   char* group = rows_->newRowTest(
-      driverThreadContext()->driverCtx()->queryConfig().hashTablePageSize());
+      queryConfig.hashTablePageSize(),
+      queryConfig.hashTableMinPages(),
+      queryConfig.hashTableHugePageThreshold(),
+      queryConfig.hashTableHugePageNums());
   lookup.hits[row] = group; // NOLINT
   storeKeys(lookup, row);
   storeRowPointer(index, lookup.hashes[row], group);
