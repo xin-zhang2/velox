@@ -1342,9 +1342,7 @@ class QueryConfig {
   }
 
   uint64_t hashTablePageSize() const {
-    return config::toCapacity(
-        get<std::string>(kHashTablePageSize, "4kB"),
-        config::CapacityUnit::BYTE);
+    return get<uint64_t>(kHashTablePageSize, 4096);
   }
 
   int32_t hashTableMinPages() const {
@@ -1356,9 +1354,7 @@ class QueryConfig {
   }
 
   int64_t hashTableHugePageThreshold() const {
-    return config::toCapacity(
-        get<std::string>(kHashTableHugePageThreshold, "256kB"),
-        config::CapacityUnit::BYTE);
+    return get<int64_t>(kHashTableHugePageThreshold, 256 << 10);
   }
 
   std::string source() const {
