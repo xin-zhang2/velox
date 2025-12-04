@@ -82,7 +82,8 @@ char* AllocationPool::allocateFixedTest(
     uint64_t pageSize,
     int32_t minPages,
     int64_t hugePageThreshold,
-    int32_t hugePageNums) {
+    int32_t hugePageNums,
+    bool enableHugePage) {
   VELOX_CHECK_GT(bytes, 0, "Cannot allocate zero bytes");
   if (freeAddressableBytes() >= bytes && alignment == 1) {
     auto* result = startOfRun_ + currentOffset_;
@@ -103,12 +104,22 @@ char* AllocationPool::allocateFixedTest(
 
   if (freeAddressableBytes() == 0) {
     newRunImplWithPageSize(
-        numPages, pageSize, minPages, hugePageThreshold, hugePageNums);
+        numPages,
+        pageSize,
+        minPages,
+        hugePageThreshold,
+        hugePageNums,
+        enableHugePage);
   } else {
     auto alignedBytes = bytes + alignmentPadding(firstFreeInRun(), alignment);
     if (freeAddressableBytes() < alignedBytes) {
       newRunImplWithPageSize(
-          numPages, pageSize, minPages, hugePageThreshold, hugePageNums);
+          numPages,
+          pageSize,
+          minPages,
+          hugePageThreshold,
+          hugePageNums,
+          enableHugePage);
     }
   }
   currentOffset_ += alignmentPadding(firstFreeInRun(), alignment);
@@ -188,9 +199,11 @@ void AllocationPool::newRunImplWithPageSize(
     const uint64_t pageSize,
     int32_t minPages,
     int64_t hugePageThreshold,
-    int32_t hugePageNum) {
-  if (usedBytes_ >= hugePageThreshold ||
-      numPages > pool_->sizeClasses().back()) {
+    int32_t hugePageNum,
+    bool enableHugePage) {
+  if (enableHugePage &&
+      (usedBytes_ >= hugePageThreshold ||
+       numPages > pool_->sizeClasses().back())) {
     // At least 16 huge pages, no more than kMaxMmapBytes. The next is
     // double the previous. Because the previous is a hair under the
     // power of two because of fractional pages at ends of allocation,

@@ -337,7 +337,8 @@ char* HashTable<ignoreNullKeys>::insertEntry(
       queryConfig.hashTablePageSize(),
       queryConfig.hashTableMinPages(),
       queryConfig.hashTableHugePageThreshold(),
-      queryConfig.hashTableHugePageNums());
+      queryConfig.hashTableHugePageNums(),
+      queryConfig.hashTableEnableHugePage());
   lookup.hits[row] = group; // NOLINT
   storeKeys(lookup, row);
   storeRowPointer(index, lookup.hashes[row], group);

@@ -408,7 +408,8 @@ void HashBuild::addInput(RowVectorPtr input) {
         queryConfig.hashTablePageSize(),
         queryConfig.hashTableMinPages(),
         queryConfig.hashTableHugePageThreshold(),
-        queryConfig.hashTableHugePageNums());
+        queryConfig.hashTableHugePageNums(),
+        queryConfig.hashTableEnableHugePage());
     if (nextOffset) {
       *reinterpret_cast<char**>(newRow + nextOffset) = nullptr;
     }

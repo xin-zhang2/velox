@@ -46,7 +46,8 @@ class AllocationPool {
       uint64_t pageSize,
       int32_t minPages,
       int64_t hugePageThreshold,
-      int32_t hugePageNums);
+      int32_t hugePageNums,
+      bool enableHugePage);
 
   // Starts a new run for variable length allocation. The actual size
   // is at least one machine page. Throws std::bad_alloc if no space.
@@ -150,7 +151,8 @@ class AllocationPool {
       uint64_t pageSize,
       int32_t minPages,
       int64_t hugePageThreshold,
-      int32_t hugePageNum);
+      int32_t hugePageNum,
+      bool enableHugePage);
 
   memory::MemoryPool* pool_;
   std::vector<memory::Allocation> allocations_;

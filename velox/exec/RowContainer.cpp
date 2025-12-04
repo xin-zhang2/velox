@@ -287,7 +287,8 @@ char* RowContainer::newRowTest(
     uint64_t pageSize,
     int32_t minPages,
     int64_t hugePageThreshold,
-    int32_t hugePageNums) {
+    int32_t hugePageNums,
+    bool enableHugePage) {
   VELOX_DCHECK(mutable_, "Can't add row into an immutable row container");
   ++numRows_;
   char* row;
@@ -303,7 +304,8 @@ char* RowContainer::newRowTest(
               pageSize,
               minPages,
               hugePageThreshold,
-              hugePageNums) +
+              hugePageNums,
+              enableHugePage) +
         normalizedKeySize_;
     if (normalizedKeySize_) {
       ++numRowsWithNormalizedKey_;

@@ -755,6 +755,9 @@ class QueryConfig {
   static constexpr const char* kHashTableHugePageNums =
       "hashtable_huge_page_nums";
 
+  static constexpr const char* kHashTableEnableHugePage =
+      "hashtable_enable_huge_page";
+
   enum class RowSizeTrackingMode {
     DISABLED = 0,
     EXCLUDE_DELTA_SPLITS = 1,
@@ -1355,6 +1358,10 @@ class QueryConfig {
 
   int64_t hashTableHugePageThreshold() const {
     return get<int64_t>(kHashTableHugePageThreshold, 256 << 10);
+  }
+
+  bool hashTableEnableHugePage() const {
+    return get<bool>(kHashTableEnableHugePage, true);
   }
 
   std::string source() const {
