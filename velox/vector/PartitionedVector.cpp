@@ -16,6 +16,7 @@
 #include "velox/vector/PartitionedVector.h"
 
 #include "velox/vector/DictionaryVector.h"
+#include "velox/vector/TypeAliases.h"
 #include "velox/vector/VectorTypeUtils.h"
 
 namespace facebook::velox {
