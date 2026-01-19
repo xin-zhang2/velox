@@ -88,7 +88,6 @@ void benchmarkComputeValueIds(bool withNulls) {
   }
 }
 
-
 template <typename T>
 void benchmarkHash(bool withNulls, bool mix) {
   folly::BenchmarkSuspender suspender;
@@ -134,27 +133,27 @@ void benchmarkHashNew(bool withNulls, bool mix) {
   }
 }
 
-//template <typename T>
-//void benchmarkHashNewNeon(bool withNulls, bool mix) {
-//  folly::BenchmarkSuspender suspender;
-//  vector_size_t size = 1'000;
-//  BenchmarkBase base;
-//  VectorHasher hasher(CppToType<T>::create(), 0);
-//  auto values = base.vectorMaker().flatVector<T>(
-//      size,
-//      [](vector_size_t row) { return row % 17; },
-//      withNulls ? test::VectorMaker::nullEvery(7) : nullptr);
+// template <typename T>
+// void benchmarkHashNewNeon(bool withNulls, bool mix) {
+//   folly::BenchmarkSuspender suspender;
+//   vector_size_t size = 1'000;
+//   BenchmarkBase base;
+//   VectorHasher hasher(CppToType<T>::create(), 0);
+//   auto values = base.vectorMaker().flatVector<T>(
+//       size,
+//       [](vector_size_t row) { return row % 17; },
+//       withNulls ? test::VectorMaker::nullEvery(7) : nullptr);
 //
-//  raw_vector<uint64_t> hashes(size);
-//  hasher.decode(*values);
+//   raw_vector<uint64_t> hashes(size);
+//   hasher.decode(*values);
 //
-//  suspender.dismiss();
+//   suspender.dismiss();
 //
-//  for (int i = 0; i < 10'000; i++) {
-//    hasher.hashNeon(mix, hashes);
-//    folly::doNotOptimizeAway(hashes);
-//  }
-//}
+//   for (int i = 0; i < 10'000; i++) {
+//     hasher.hashNeon(mix, hashes);
+//     folly::doNotOptimizeAway(hashes);
+//   }
+// }
 
 template <typename T>
 void benchmarkxx64Hash(bool withNulls, bool mix) {
@@ -212,21 +211,21 @@ BENCHMARK(benchmarkHashNewNoNullsMix) {
   benchmarkHashNew<int64_t>(false, true);
 }
 
-//BENCHMARK(benchmarkHashNewNoNullsNoMixNeon) {
-//  benchmarkHashNewNeon<int64_t>(false, false);
-//}
+// BENCHMARK(benchmarkHashNewNoNullsNoMixNeon) {
+//   benchmarkHashNewNeon<int64_t>(false, false);
+// }
 //
-//BENCHMARK(benchmarkHashNewWithNullsNoMixNeon) {
-//  benchmarkHashNewNeon<int64_t>(true, false);
-//}
+// BENCHMARK(benchmarkHashNewWithNullsNoMixNeon) {
+//   benchmarkHashNewNeon<int64_t>(true, false);
+// }
 //
-//BENCHMARK(benchmarkHashNewWithNullsMixNeon) {
-//  benchmarkHashNewNeon<int64_t>(true, true);
-//}
+// BENCHMARK(benchmarkHashNewWithNullsMixNeon) {
+//   benchmarkHashNewNeon<int64_t>(true, true);
+// }
 //
-//BENCHMARK(benchmarkHashNewNoNullsMixNeon) {
-//  benchmarkHashNewNeon<int64_t>(false, true);
-//}
+// BENCHMARK(benchmarkHashNewNoNullsMixNeon) {
+//   benchmarkHashNewNeon<int64_t>(false, true);
+// }
 
 BENCHMARK(benchmarkxx64HashNewNoNullsNoMix) {
   benchmarkHashNew<int64_t>(false, false);

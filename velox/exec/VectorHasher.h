@@ -209,13 +209,13 @@ class VectorHasher {
   template <typename T>
   void hashFlatValues(bool mix, uint64_t* result);
 
-//  void hashNeon(bool mix, raw_vector<uint64_t>& result);
-//
-//  template <TypeKind Kind>
-//  void hashValuesNeon(bool mix, uint64_t* result);
-//
-//  template <typename T>
-//  void hashFlatValuesNeon(bool mix, uint64_t* result);
+  //  void hashNeon(bool mix, raw_vector<uint64_t>& result);
+  //
+  //  template <TypeKind Kind>
+  //  void hashValuesNeon(bool mix, uint64_t* result);
+  //
+  //  template <typename T>
+  //  void hashFlatValuesNeon(bool mix, uint64_t* result);
 
   void hashPrecomputed(bool mix, raw_vector<uint64_t>& result) const;
 

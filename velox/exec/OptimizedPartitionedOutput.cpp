@@ -98,7 +98,7 @@ void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
   // input->size() << " rows.";
   // TODO: replicateNullsAndAny_
 
-  if (serializer_->bytesBuffered() + input->inMemoryBytes() >=
+  if (serializer_->bytesBuffered() /*+ input->inMemoryBytes()*/ >=
       maxBufferedBytes_) {
     //      >=   maxSerializedPageBytes_ * numPartitions_) {
     flush();

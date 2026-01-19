@@ -15,6 +15,7 @@
  */
 // #include <iostream>
 
+#include "dwio/common/DecoderUtil.h"
 #include "velox/exec/ExchangeQueue.h"
 #include "velox/exec/OutputBufferManager.h"
 #include "velox/serializers/PrestoSerializer.h"
@@ -173,7 +174,7 @@ class IterativePartitioningSerializer {
 
   const std::weak_ptr<exec::OutputBufferManager> bufferManager_;
   const std::function<void()> bufferReleaseFn_;
-  const std::unique_ptr<folly::io::Codec> codec_;
+  const std::unique_ptr<folly::compression::Codec> codec_;
   const std::unique_ptr<core::PartitionFunction> partitionFunction_;
   StreamArena streamArena_;
   memory::MemoryPool* const pool_;

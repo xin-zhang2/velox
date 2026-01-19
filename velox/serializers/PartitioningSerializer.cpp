@@ -194,7 +194,7 @@ void IterativePartitioningSerializer::append(RowVectorPtr& input) {
 
   partitionedPages_.emplace_back(partitionedPage);
 
-  bytesBuffered_ += input->inMemoryBytes();
+  // bytesBuffered_ += input->inMemoryBytes();
   rowsBuffered_ += numRows;
 }
 
@@ -547,8 +547,11 @@ void IterativePartitioningSerializer::flushNulls(
       carry *= (1 - writeCondition); // Reset to 0 if writing
 
       numBitsInPartition -= bitsToTake;
-      bitOffset *= (numBitsInPartition > 0); // Reset to 0 if no more bits to process
-      startByte += (bitOffset == 0 && numBitsInPartition > 0); // Move to next byte if needed
+      bitOffset *=
+          (numBitsInPartition > 0); // Reset to 0 if no more bits to process
+      startByte +=
+          (bitOffset == 0 &&
+           numBitsInPartition > 0); // Move to next byte if needed
       currentByte =
           static_cast<uint8_t>(nulls[startByte]) * (startByte <= endByte);
 
