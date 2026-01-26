@@ -47,28 +47,6 @@ inline void countPartitionSizes(
   counts[p] += lastTopRowOffset - topRowOffsets[numTopRows - 1];
 }
 
-template <typename T>
-void partitionFixedWidthValuesInPlace(
-    T*& values,
-    const std::vector<uint32_t>& partitions,
-    uint32_t numPartitions,
-    vector_size_t*& beginPartitionOffsets,
-    vector_size_t*& endPartitionOffsets) {
-  for (auto partition = 0; partition < numPartitions; partition++) {
-    auto& offset = beginPartitionOffsets[partition];
-    auto endOffset = endPartitionOffsets[partition];
-    while (offset < endOffset) {
-      uint32_t p = partitions[offset];
-      while (p != partition) {
-        auto destinationOffset = beginPartitionOffsets[p]++;
-        std::swap(values[destinationOffset], values[offset]);
-        p = partitions[destinationOffset];
-      }
-      offset = ++beginPartitionOffsets[partition];
-    }
-  }
-}
-
 // This has to be called after endPartitionOffsetsBuffer is populated
 void initializeBeginPartitionOffsets(
     BufferPtr& beginPartitionOffsetsBuffer,
@@ -139,6 +117,52 @@ void partitionBitsInPlace(
 }
 
 template <typename T>
+void partitionFixedWidthValuesInPlace(
+    T*& values,
+    const std::vector<uint32_t>& partitions,
+    uint32_t numPartitions,
+    BufferPtr& beginPartitionOffsetsBuffer,
+    BufferPtr& endPartitionOffsetsBuffer,
+    velox::memory::MemoryPool* pool) {
+  auto beginPartitionOffsets =
+      beginPartitionOffsetsBuffer->asMutable<vector_size_t>();
+  auto endPartitionOffsets =
+      endPartitionOffsetsBuffer->asMutable<vector_size_t>();
+
+  for (auto partition = 0; partition < numPartitions; partition++) {
+    auto& offset = beginPartitionOffsets[partition];
+    auto endOffset = endPartitionOffsets[partition];
+    while (offset < endOffset) {
+      uint32_t p = partitions[offset];
+      while (p != partition) {
+        auto destinationOffset = beginPartitionOffsets[p]++;
+        std::swap(values[destinationOffset], values[offset]);
+        p = partitions[destinationOffset];
+      }
+      offset = ++beginPartitionOffsets[partition];
+    }
+  }
+}
+
+template <>
+void partitionFixedWidthValuesInPlace<bool>(
+    bool*& values,
+    const std::vector<uint32_t>& partitions,
+    uint32_t numPartitions,
+    BufferPtr& beginPartitionOffsetsBuffer,
+    BufferPtr& endPartitionOffsetsBuffer,
+    velox::memory::MemoryPool* pool) {
+  auto input = reinterpret_cast<char*>(values);
+  partitionBitsInPlace(
+      input,
+      partitions,
+      numPartitions,
+      beginPartitionOffsetsBuffer,
+      endPartitionOffsetsBuffer,
+      pool);
+}
+
+template <typename T>
 void partitionFixedWidthValuesToOutput(
     T*& input,
     const std::vector<uint32_t>& topRowPartitions,
@@ -193,20 +217,18 @@ void partitionFixedWidthValues(
       numPartitions,
       pool);
 
-  auto beginPartitionOffsets =
-      beginPartitionOffsetsBuffer->asMutable<vector_size_t>();
-  auto endPartitionOffsets =
-      endPartitionOffsetsBuffer->asMutable<vector_size_t>();
-
   if (nestLevel == 0) {
     // It's the top level so just partition in place
     partitionFixedWidthValuesInPlace<T>(
         input,
         topRowPartitions,
         numPartitions,
-        beginPartitionOffsets,
-        endPartitionOffsets);
+        beginPartitionOffsetsBuffer,
+        endPartitionOffsetsBuffer,
+        pool);
   } else {
+    auto beginPartitionOffsets =
+        beginPartitionOffsetsBuffer->asMutable<vector_size_t>();
     ensureCapacity<T>(swappingBuffer, numRows, pool);
     auto buffer = swappingBuffer->asMutable<T>();
     auto topRowOffsets = topRowOffsetsBuffer->asMutable<vector_size_t>();

@@ -173,7 +173,7 @@ class PartitionedVector {
   const uint32_t numPartitions_;
   BufferPtr partitionOffsets_;
   vector_size_t* rawPartitionOffsets_;
-  // We want to defer the DictionaryVector values copy-out to the fluhing time
+  // We want to defer the DictionaryVector values copy-out to the flushing time
   BufferPtr indices_;
   velox::memory::MemoryPool* pool_;
 };
