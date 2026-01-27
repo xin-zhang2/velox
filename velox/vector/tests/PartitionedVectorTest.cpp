@@ -86,13 +86,13 @@ class PartitioningVectorTest : public testing::Test,
         pool_.get());
     ASSERT_NE(partitionedVector, nullptr);
 
-//    std::vector<VectorPtr> partitionedVectors(numPartitions, nullptr);
+    //    std::vector<VectorPtr> partitionedVectors(numPartitions, nullptr);
     std::vector<VectorPtr> partitionedVectors;
     vector_size_t lastOffset = 0;
     for (uint32_t i = 0; i < numPartitions; ++i) {
       auto partition = partitionedVector->partitionAt(i);
       partitionedVectors.push_back(partition);
-//      partitionedVectors[i] = partitionedVector->partitionAt(i);
+      //      partitionedVectors[i] = partitionedVector->partitionAt(i);
     }
 
     for (uint32_t i = 0; i < numPartitions; ++i) {
@@ -219,4 +219,3 @@ TEST_F(PartitioningVectorTest, testDictOverDictOfFlatVector) {
     testCase(numValues, makeAllNullFlatVector<int>(numValues));
   }
 }
-
