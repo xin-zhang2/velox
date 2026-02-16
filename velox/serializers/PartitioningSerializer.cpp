@@ -314,17 +314,24 @@ void IterativePartitioningSerializer::flushColumn(
     case TypeKind::BIGINT:
     case TypeKind::REAL:
     case TypeKind::DOUBLE:
-    case TypeKind::VARCHAR:
-    case TypeKind::VARBINARY:
     case TypeKind::TIMESTAMP:
     case TypeKind::HUGEINT:
-      return flushSimpleColumn(partitionedVectors, nestedLevel, outputStreams);
+      flushSimpleColumn(partitionedVectors, nestedLevel, outputStreams);
+      break;
+
+    case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
+      flushStringViewColumn(
+          partitionedVectors, nestedLevel, outputStreams);
+      break;
 
     case TypeKind::ARRAY:
-      return flushArrayColumn(partitionedVectors, nestedLevel, outputStreams);
+      flushArrayColumn(partitionedVectors, nestedLevel, outputStreams);
+      break;
 
     case TypeKind::ROW:
-      return flushRowColumn(partitionedVectors, nestedLevel, outputStreams);
+      flushRowColumn(partitionedVectors, nestedLevel, outputStreams);
+      break;
 
     case TypeKind::MAP:
       VELOX_UNSUPPORTED(
@@ -408,6 +415,80 @@ void IterativePartitioningSerializer::flushSimpleColumn(
 
   for (int i = 0; i < partitionedVectors.size(); i++) {
     flushPartitionedSimpleVector(partitionedVectors[i], outputStreams);
+  }
+}
+
+void IterativePartitioningSerializer::flushStringViewColumn(
+    const std::vector<PartitionedVectorPtr>& partitionedVectors,
+    uint32_t nestedLevel,
+    std::vector<IOBufOutputStream>& outputStreams) {
+  flushHeader(
+      typeToEncodingName(partitionedVectors[0]->baseVector()->type()),
+      outputStreams);
+
+  flushRowCounts(partitionedVectors, nestedLevel, outputStreams);
+
+  std::vector<int32_t> cumulativeOffsets(numPartitions_, 0);
+
+  for (const auto& partitionedVector : partitionedVectors) {
+    auto* flatVector = partitionedVector->as<PartitionedFlatVector<StringView>>();
+    const auto* values =
+        flatVector->baseVector()->as<FlatVector<StringView>>()->rawValues();
+    const auto* offsets = flatVector->rawPartitionOffsets();
+
+    vector_size_t lastOffset = 0;
+    for (int32_t p = 0; p < numPartitions_; ++p) {
+      const auto partitionEnd = offsets[p];
+      if (!flatVector->indices()) {
+        for (auto i = lastOffset; i < partitionEnd; ++i) {
+          cumulativeOffsets[p] += values[i].size();
+          writeInt32(&outputStreams[p], cumulativeOffsets[p]);
+        }
+      } else {
+        const auto* indices = flatVector->indices()->as<vector_size_t>();
+        for (auto i = lastOffset; i < partitionEnd; ++i) {
+          cumulativeOffsets[p] += values[indices[i]].size();
+          writeInt32(&outputStreams[p], cumulativeOffsets[p]);
+        }
+      }
+      lastOffset = partitionEnd;
+    }
+  }
+
+  flushNullFlag(partitionedVectors, outputStreams);
+  flushNulls(partitionedVectors, outputStreams);
+
+  for (int32_t p = 0; p < numPartitions_; ++p) {
+    writeInt32(&outputStreams[p], cumulativeOffsets[p]);
+  }
+
+  for (const auto& partitionedVector : partitionedVectors) {
+    auto* flatVector = partitionedVector->as<PartitionedFlatVector<StringView>>();
+    const auto* values =
+        flatVector->baseVector()->as<FlatVector<StringView>>()->rawValues();
+    const auto* offsets = flatVector->rawPartitionOffsets();
+
+    vector_size_t lastOffset = 0;
+    for (int32_t p = 0; p < numPartitions_; ++p) {
+      const auto partitionEnd = offsets[p];
+      if (!flatVector->indices()) {
+        for (auto i = lastOffset; i < partitionEnd; ++i) {
+          const auto value = values[i];
+          if (value.size() > 0) {
+            outputStreams[p].write(value.data(), value.size());
+          }
+        }
+      } else {
+        const auto* indices = flatVector->indices()->as<vector_size_t>();
+        for (auto i = lastOffset; i < partitionEnd; ++i) {
+          const auto value = values[indices[i]];
+          if (value.size() > 0) {
+            outputStreams[p].write(value.data(), value.size());
+          }
+        }
+      }
+      lastOffset = partitionEnd;
+    }
   }
 }
 

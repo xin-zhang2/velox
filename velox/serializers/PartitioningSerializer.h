@@ -79,6 +79,11 @@ class IterativePartitioningSerializer {
       uint32_t nestedLevel,
       std::vector<IOBufOutputStream>& outputStreams);
 
+  void flushStringViewColumn(
+      const std::vector<PartitionedVectorPtr>& partitionedVectors,
+      uint32_t nestedLevel,
+      std::vector<IOBufOutputStream>& outputStreams);
+
   void flushRowColumn(
       const std::vector<PartitionedVectorPtr>& partitionedRowVectors,
       uint32_t nestedLevel,
