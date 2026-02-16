@@ -132,13 +132,14 @@ void rightShiftBits(uint8_t* bits, size_t length, uint8_t n) {
 
 IterativePartitioningSerializer::IterativePartitioningSerializer(
     const RowTypePtr inputType,
+    const RowTypePtr outputType,
     int32_t numDestinations,
     const std::function<void()>& bufferReleaseFn,
     const SerdeOpts& opts,
     std::unique_ptr<core::PartitionFunction> partitionFunction,
     memory::MemoryPool* pool)
     : inputType_(inputType),
-      outputType_(inputType),
+      outputType_(outputType),
       numPartitions_(numDestinations),
       bufferManager_(exec::OutputBufferManager::getInstanceRef()),
       bufferReleaseFn_(bufferReleaseFn),
@@ -155,12 +156,13 @@ IterativePartitioningSerializer::IterativePartitioningSerializer(
   flushingHeader_[5] = codecMask;
 }
 
-void IterativePartitioningSerializer::append(RowVectorPtr& input) {
+void IterativePartitioningSerializer::append(
+    RowVectorPtr& input,
+    RowVectorPtr& output) {
   // VLOG(0) << "IterativePartitioningSerializer::append appending input " <<
   // input->toString();
-  numColumns_ = input->children().size();
+  numColumns_ = output->children().size();
 
-  auto rowType = asRowType(input->type());
   auto numRows = input->size();
 
   if (numPartitions_ == 1) {
@@ -175,7 +177,7 @@ void IterativePartitioningSerializer::append(RowVectorPtr& input) {
   }
 
   BufferPtr partitionOffsetsBuffer;
-  VectorPtr vector = std::dynamic_pointer_cast<BaseVector>(input);
+  VectorPtr vector = std::dynamic_pointer_cast<BaseVector>(output);
   auto partitionedPage = PartitionedVector::create(
       vector,
       topRowPartitions_,
@@ -200,7 +202,7 @@ void IterativePartitioningSerializer::append(RowVectorPtr& input) {
 
   partitionedPages_.emplace_back(partitionedPage);
 
-  bytesBuffered_ += input->inMemoryBytes();
+  bytesBuffered_ += output->inMemoryBytes();
   rowsBuffered_ += numRows;
 }
 
@@ -283,14 +285,15 @@ void IterativePartitioningSerializer::flushPartitionedRowChildren(
     uint32_t nestedLevel,
     std::vector<IOBufOutputStream>& outputStreams) {
   std::vector<PartitionedVectorPtr> tempVectors(partitionedRowVectors.size());
-  int32_t numColumns = outputType_->children().size();
+  VELOX_CHECK_GT(partitionedRowVectors.size(), 0);
+  int32_t numColumns =
+      asRowType(partitionedRowVectors[0]->baseVector()->type())->size();
   for (uint32_t column = 0; column < numColumns; column++) {
     for (int i = 0; i < partitionedRowVectors.size(); i++) {
       tempVectors[i] =
           partitionedRowVectors[i]->as<PartitionedRowVector>()->childAt(column);
     }
     // flush column to output
-    auto typeKind = outputType_->childAt(column)->kind();
     flushColumn(tempVectors, nestedLevel + 1, outputStreams);
   }
 }
@@ -348,30 +351,34 @@ void IterativePartitioningSerializer::flushRowColumn(
     const std::vector<PartitionedVectorPtr>& partitionedRowVectors,
     uint32_t nestedLevel,
     std::vector<IOBufOutputStream>& outputStreams) {
-  //  VELOX_CHECK_GT(partitionedRowVectors.size(), 0);
-  //
-  //  flushHeader(kRow, outputStreams);
-  //
-  //  // Write number of columns to all outputStreams
-  //  int32_t numColumns =
-  //      asRowType(partitionedRowVectors[0]->baseVector()->type())->children().size();
-  //  for (auto& out : outputStreams) {
-  //    writeInt32(&out, numColumns);
-  //  }
-  //
-  //  flushRowChildren(partitionedRowVectors, nestedLevel, outputStreams);
-  //
-  //  flushRowCounts(partitionedRowVectors, nestedLevel, outputStreams);
-  //
-  //  // flush lengths_
-  //  for (auto& partitionedArrayVector : partitionedRowVectors) {
-  //    const auto* partitionOffsets =
-  //        partitionedArrayVector->rawPartitionOffsets();
-  //    const auto* rawSizes =
-  //        partitionedArrayVector->baseVector()->as<RowVectorPtr>()->rawSizes();
-  //    flushFlatValues<vector_size_t>(rawSizes, partitionOffsets,
-  //    outputStreams);
-  //  }
+  VELOX_CHECK_GT(partitionedRowVectors.size(), 0);
+
+  flushHeader(kRow, outputStreams);
+
+  const int32_t numColumns =
+      asRowType(partitionedRowVectors[0]->baseVector()->type())->size();
+  for (auto& out : outputStreams) {
+    writeInt32(&out, numColumns);
+  }
+
+  flushPartitionedRowChildren(partitionedRowVectors, nestedLevel, outputStreams);
+
+  // For nullsFirst == false, ROW encoding appends size + offsets + nulls
+  // after children. The current optimized path doesn't support null rows, so
+  // offsets are always 0..N for each destination.
+  std::vector<vector_size_t> rowCounts =
+      nestedLevel == 1 ? topRowCounts_
+                       : countRowsInPartitions(partitionedRowVectors, false);
+  for (int destination = 0; destination < numPartitions_; ++destination) {
+    writeInt32(&outputStreams[destination], rowCounts[destination]);
+    writeInt32(&outputStreams[destination], 0);
+    for (int32_t i = 1; i <= rowCounts[destination]; ++i) {
+      writeInt32(&outputStreams[destination], i);
+    }
+  }
+
+  flushNullFlag(partitionedRowVectors, outputStreams);
+  flushNulls(partitionedRowVectors, outputStreams);
 }
 
 void IterativePartitioningSerializer::flushArrayColumn(
@@ -636,8 +643,11 @@ void IterativePartitioningSerializer::flushNulls(
       carry *= (1 - writeCondition); // Reset to 0 if writing
 
       numBitsInPartition -= bitsToTake;
-      bitOffset *= (numBitsInPartition > 0); // Reset to 0 if no more bits to process
-      startByte += (bitOffset == 0 && numBitsInPartition > 0); // Move to next byte if needed
+      bitOffset *=
+          (numBitsInPartition > 0); // Reset to 0 if no more bits to process
+      startByte +=
+          (bitOffset == 0 &&
+           numBitsInPartition > 0); // Move to next byte if needed
       currentByte =
           static_cast<uint8_t>(nulls[startByte]) * (startByte <= endByte);
 

@@ -37,6 +37,7 @@ class IterativePartitioningSerializer {
  public:
   IterativePartitioningSerializer(
       const RowTypePtr inputType,
+      const RowTypePtr outputType,
       int32_t numDestinations,
       const std::function<void()>& bufferReleaseFn,
       const SerdeOpts& opts,
@@ -55,7 +56,7 @@ class IterativePartitioningSerializer {
   //              << totalFlushedBytes_ / numSerializedPages_ << std::endl;
   //  }
 
-  void append(RowVectorPtr& vector);
+  void append(RowVectorPtr& input, RowVectorPtr& output);
 
   /// Flush to all destinations
   std::map<uint32_t, std::unique_ptr<exec::SerializedPage>> flushUncompressed();

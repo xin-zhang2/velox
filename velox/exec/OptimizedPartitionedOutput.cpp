@@ -77,6 +77,7 @@ OptimizedPartitionedOutput::OptimizedPartitionedOutput(
   serializer_ =
       std::make_unique<serializer::presto::IterativePartitioningSerializer>(
           inputType_,
+          planNode->outputType(),
           numDestinations_,
           bufferReleaseFn_,
           options,
@@ -98,13 +99,35 @@ void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
   // input->size() << " rows.";
   // TODO: replicateNullsAndAny_
 
-  if (serializer_->bytesBuffered() + input->inMemoryBytes() >=
+  RowVectorPtr output;
+  if (outputType_->size() == 0) {
+    output = std::make_shared<RowVector>(
+      input->pool(),
+      outputType_,
+      nullptr, input->size(), std::vector<VectorPtr>());
+  } else if (outputChannels_.empty()) {
+    output = input;
+  } else {
+    std::vector<VectorPtr> outputColumns;
+    outputColumns.reserve(outputChannels_.size());
+    for (auto channel : outputChannels_) {
+      outputColumns.push_back(input->childAt(channel));
+    }
+    output = std::make_shared<RowVector>(
+        input->pool(), outputType_, nullptr, input->size(), outputColumns);
+  }
+
+  for (auto i = 0; i < output->childrenSize(); ++i) {
+    output->childAt(i)->loadedVector();
+  }
+
+  if (serializer_->bytesBuffered() + output->inMemoryBytes() >=
       maxBufferedBytes_) {
     //      >=   maxSerializedPageBytes_ * numPartitions_) {
     flush();
   }
 
-  serializer_->append(input);
+  serializer_->append(input, output);
 }
 
 RowVectorPtr OptimizedPartitionedOutput::getOutput() {
