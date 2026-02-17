@@ -949,7 +949,7 @@ class QueryConfig {
   }
 
   bool optimizedPartitionedOutputEnabled() const {
-    return get<bool>(kOptimizedPartitionedOutputEnabled, false);
+    return get<bool>(kOptimizedPartitionedOutputEnabled, true);
   }
 
   uint64_t maxPartitionedOutputBufferSize() const {
