@@ -210,11 +210,13 @@ IterativePartitioningSerializer::flushUncompressed() {
 
   // Flush headers for all destinations
   std::vector<IOBufOutputStream> outputStreams;
+  std::vector<std::unique_ptr<OutputStreamListener>> listeners;
+  listeners.reserve(numPartitions_);
   std::vector<int32_t> beginOffsets(numPartitions_, 0);
   for (uint32_t destination = 0; destination < numPartitions_; destination++) {
-    auto listener = bufferManager_.lock()->newListener();
+    listeners.emplace_back(bufferManager_.lock()->newListener());
     outputStreams.emplace_back(
-        *pool_, listener.get(), bytesBuffered_ / numPartitions_);
+        *pool_, listeners.back().get(), bytesBuffered_ / numPartitions_);
     auto& out = outputStreams[destination];
 
     auto prestoListener =
