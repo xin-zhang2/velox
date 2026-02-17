@@ -67,6 +67,7 @@ BiasVector<T>::BiasVector(
   biasBuffer_ = simd::setAll(bias_);
 #endif
   rawValues_ = values_->as<uint8_t>();
+  BaseVector::inMemoryBytes_ += values_->size();
 }
 
 template <typename T>

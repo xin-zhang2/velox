@@ -105,6 +105,11 @@ class FlatVector final : public SimpleVector<T> {
       // immutable Buffer.
       values_->setSize(byteSize);
     }
+
+    BaseVector::inMemoryBytes_ += values_->capacity();
+    for (const auto& stringBuffer : stringBuffers_) {
+      BaseVector::inMemoryBytes_ += stringBuffer->capacity();
+    }
   }
 
   virtual ~FlatVector() override = default;

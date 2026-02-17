@@ -67,8 +67,6 @@ core::PlanNodePtr TaskTraceMetadataReader::queryPlan() const {
 }
 
 std::string TaskTraceMetadataReader::nodeName(const std::string& nodeId) const {
-  LOG(ERROR) << "node id " << nodeId << " trace plan node "
-             << tracePlanNode_->toString(true, true);
   const auto* traceNode =
       core::PlanNode::findNodeById(tracePlanNode_.get(), nodeId);
   VELOX_CHECK_NOT_NULL(
