@@ -31,6 +31,8 @@ namespace facebook::velox::serializer::presto {
 // using PartitionedVectorPtr = std::shared_ptr<PartitionedVector>;
 using SerdeOpts = PrestoVectorSerde::PrestoOptions;
 
+using RowSet = folly::Range<const vector_size_t*>;
+
 class IterativePartitioningSerializer {
  public:
   IterativePartitioningSerializer(
@@ -173,7 +175,7 @@ class IterativePartitioningSerializer {
 
   const std::weak_ptr<exec::OutputBufferManager> bufferManager_;
   const std::function<void()> bufferReleaseFn_;
-  const std::unique_ptr<folly::io::Codec> codec_;
+  const std::unique_ptr<folly::compression::Codec> codec_;
   const std::unique_ptr<core::PartitionFunction> partitionFunction_;
   StreamArena streamArena_;
   memory::MemoryPool* const pool_;
