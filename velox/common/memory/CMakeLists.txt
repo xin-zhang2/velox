@@ -35,6 +35,18 @@ velox_add_library(
   StreamArena.cpp
 )
 
+target_compile_options(velox_memory
+        PUBLIC
+        -fsanitize=address
+        -fno-omit-frame-pointer
+        -g
+        -O0
+)
+target_link_options(velox_memory
+        PUBLIC
+        -fsanitize=address
+        -fno-omit-frame-pointer -g -O0)
+
 velox_link_libraries(
   velox_memory
   PUBLIC

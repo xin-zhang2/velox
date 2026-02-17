@@ -39,6 +39,17 @@ velox_add_library(
   SerializedPageFile.cpp
   VectorStream.cpp
 )
+target_compile_options(velox_presto_serializer
+  PUBLIC
+  -fsanitize=address
+  -fno-omit-frame-pointer
+  -g
+  -O0
+)
+target_link_options(velox_presto_serializer
+  PUBLIC
+  -fsanitize=address
+  -fno-omit-frame-pointer -g -O0)
 
 velox_link_libraries(velox_presto_serializer velox_vector velox_row_fast)
 
