@@ -163,9 +163,15 @@ void IterativePartitioningSerializer::append(RowVectorPtr& input) {
   auto rowType = asRowType(input->type());
   auto numRows = input->size();
 
-  if (numPartitions_ > 1) {
+  if (numPartitions_ == 1) {
+    topRowPartitions_.assign(numRows, 0);
+  } else {
     VELOX_CHECK(partitionFunction_);
-    partitionFunction_->partition(*input->as<RowVector>(), topRowPartitions_);
+    const auto singlePartition = partitionFunction_->partition(
+        *input->as<RowVector>(), topRowPartitions_);
+    if (singlePartition.has_value()) {
+      topRowPartitions_.assign(numRows, singlePartition.value());
+    }
   }
 
   BufferPtr partitionOffsetsBuffer;
