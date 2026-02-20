@@ -2669,20 +2669,16 @@ void Task::addDriverStats(int pipelineId, DriverStats stats) {
 }
 
 TaskStats Task::taskStats() const {
-  // Take a snapshot under task mutex, then collect operator stats outside the
-  // lock to avoid lock-order inversion with operator internals.
-  TaskStats taskStats;
-  std::vector<std::shared_ptr<Driver>> driversSnapshot;
-  {
-    std::lock_guard<std::timed_mutex> l(mutex_);
-    taskStats = taskStats_;
-    driversSnapshot = drivers_;
-  }
+  std::lock_guard<std::timed_mutex> l(mutex_);
 
-  taskStats.numTotalDrivers = driversSnapshot.size();
+  // 'taskStats_' contains task stats plus stats for the completed drivers
+  // (their operators).
+  TaskStats taskStats = taskStats_;
+
+  taskStats.numTotalDrivers = drivers_.size();
 
   // Add stats of the drivers (their operators) that are still running.
-  for (const auto& driver : driversSnapshot) {
+  for (const auto& driver : drivers_) {
     // Driver can be null.
     if (driver == nullptr) {
       ++taskStats.numCompletedDrivers;

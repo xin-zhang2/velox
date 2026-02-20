@@ -211,8 +211,10 @@ void OptimizedPartitionedOutput::flush() {
   // VLOG(0) << "OptimizedPartitionedOutput::flush begin flushedBytes" <<
   // flushedBytes << " flushedRows:"
   //                << flushedRows;
-  auto lockedStats = stats_.wlock();
-  lockedStats->addOutputVector(flushedBytes, flushedRows);
+  {
+    auto lockedStats = stats_.wlock();
+    lockedStats->addOutputVector(flushedBytes, flushedRows);
+  }
 
   auto serializedPages = serializer_->flushUncompressed();
 
