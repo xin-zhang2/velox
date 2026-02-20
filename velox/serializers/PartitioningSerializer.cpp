@@ -478,19 +478,27 @@ void IterativePartitioningSerializer::flushStringViewColumn(
     const auto* values =
         flatVector->baseVector()->as<FlatVector<StringView>>()->rawValues();
     const auto* offsets = flatVector->rawPartitionOffsets();
+    const auto* rawNulls = flatVector->baseVector()->rawNulls();
 
     vector_size_t lastOffset = 0;
     for (int32_t p = 0; p < numPartitions_; ++p) {
       const auto partitionEnd = offsets[p];
       if (!flatVector->indices()) {
         for (auto i = lastOffset; i < partitionEnd; ++i) {
+          if (rawNulls != nullptr && bits::isBitNull(rawNulls, i)) {
+            continue;
+          }
           cumulativeOffsets[p] += values[i].size();
           writeInt32(&outputStreams[p], cumulativeOffsets[p]);
         }
       } else {
         const auto* indices = flatVector->indices()->as<vector_size_t>();
         for (auto i = lastOffset; i < partitionEnd; ++i) {
-          cumulativeOffsets[p] += values[indices[i]].size();
+          const auto sourceRow = indices[i];
+          if (rawNulls != nullptr && bits::isBitNull(rawNulls, sourceRow)) {
+            continue;
+          }
+          cumulativeOffsets[p] += values[sourceRow].size();
           writeInt32(&outputStreams[p], cumulativeOffsets[p]);
         }
       }
@@ -510,12 +518,16 @@ void IterativePartitioningSerializer::flushStringViewColumn(
     const auto* values =
         flatVector->baseVector()->as<FlatVector<StringView>>()->rawValues();
     const auto* offsets = flatVector->rawPartitionOffsets();
+    const auto* rawNulls = flatVector->baseVector()->rawNulls();
 
     vector_size_t lastOffset = 0;
     for (int32_t p = 0; p < numPartitions_; ++p) {
       const auto partitionEnd = offsets[p];
       if (!flatVector->indices()) {
         for (auto i = lastOffset; i < partitionEnd; ++i) {
+          if (rawNulls != nullptr && bits::isBitNull(rawNulls, i)) {
+            continue;
+          }
           const auto value = values[i];
           if (value.size() > 0) {
             outputStreams[p].write(value.data(), value.size());
@@ -524,7 +536,11 @@ void IterativePartitioningSerializer::flushStringViewColumn(
       } else {
         const auto* indices = flatVector->indices()->as<vector_size_t>();
         for (auto i = lastOffset; i < partitionEnd; ++i) {
-          const auto value = values[indices[i]];
+          const auto sourceRow = indices[i];
+          if (rawNulls != nullptr && bits::isBitNull(rawNulls, sourceRow)) {
+            continue;
+          }
+          const auto value = values[sourceRow];
           if (value.size() > 0) {
             outputStreams[p].write(value.data(), value.size());
           }
@@ -577,7 +593,9 @@ void IterativePartitioningSerializer::flushOffsets(
           reinterpret_cast<const char*>(&rawSizes[partitionBegin]),
           numRawSizes * typeWidth);
 
-      baseOffsets[p] = rawSizes[partitionEnd - 1];
+      if (numRawSizes > 0) {
+        baseOffsets[p] = rawSizes[partitionEnd - 1];
+      }
       partitionBegin = partitionEnd;
     }
   }
@@ -586,134 +604,100 @@ void IterativePartitioningSerializer::flushOffsets(
 void IterativePartitioningSerializer::flushNullFlag(
     const std::vector<PartitionedVectorPtr>& partitionedVectors,
     std::vector<IOBufOutputStream>& outputStreams) {
-  // TODO: for simplicity we only check the whole vector now. The actual
-  // mayHaveNulls value is one per destination
-  char mayHaveNulls = 0;
-  for (int i = 0; i < partitionedVectors.size(); i++) {
-    PartitionedVectorPtr vector = partitionedVectors[i];
-    if (vector->baseVector()->mayHaveNulls()) {
-      mayHaveNulls = 1;
-      VELOX_NYI("Partitioning vector with nulls is not supported yet.");
+  mayHaveNullsForPartition_.assign(numPartitions_, 0);
+
+  for (const auto& partitionedVector : partitionedVectors) {
+    const auto* rawNulls = partitionedVector->baseVector()->rawNulls();
+    if (!rawNulls) {
+      continue;
+    }
+
+    const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
+    const auto* indices = partitionedVector->indices()
+        ? partitionedVector->indices()->as<vector_size_t>()
+        : nullptr;
+
+    vector_size_t partitionBegin = 0;
+    for (int destination = 0; destination < numPartitions_; ++destination) {
+      if (mayHaveNullsForPartition_[destination]) {
+        partitionBegin = partitionOffsets[destination];
+        continue;
+      }
+
+      const auto partitionEnd = partitionOffsets[destination];
+      if (!indices) {
+        for (auto row = partitionBegin; row < partitionEnd; ++row) {
+          if (bits::isBitNull(rawNulls, row)) {
+            mayHaveNullsForPartition_[destination] = 1;
+            break;
+          }
+        }
+      } else {
+        for (auto row = partitionBegin; row < partitionEnd; ++row) {
+          if (bits::isBitNull(rawNulls, indices[row])) {
+            mayHaveNullsForPartition_[destination] = 1;
+            break;
+          }
+        }
+      }
+      partitionBegin = partitionEnd;
     }
   }
+
   for (int destination = 0; destination < numPartitions_; destination++) {
-    outputStreams[destination].write(&mayHaveNulls, 1);
+    outputStreams[destination].write(&mayHaveNullsForPartition_[destination], 1);
   }
 }
 
 void IterativePartitioningSerializer::flushNulls(
     const std::vector<PartitionedVectorPtr>& partitionedVectors,
     std::vector<IOBufOutputStream>& outputStreams) {
-  std::vector<uint8_t> carryOver(numPartitions_, 0);
-  std::vector<uint8_t> carryOverBits(numPartitions_, 0);
+  std::vector<uint8_t> pendingByte(numPartitions_, 0);
+  std::vector<uint8_t> pendingBits(numPartitions_, 0);
 
-  for (auto& partitionedVector : partitionedVectors) {
-    auto numRows = partitionedVector->baseVector()->size();
-    auto numBytes = bits::nbytes(numRows);
+  auto flushByte = [&](int destination, uint8_t byte) {
+    // Presto null byte format is reverse-bit-order and null=1.
+    byte = ~byte;
+    bits::reverseBits(&byte, 1);
+    outputStreams[destination].write(reinterpret_cast<const char*>(&byte), 1);
+  };
 
-    uint8_t* nulls = (uint8_t*)partitionedVector->baseVector()->rawNulls();
-
-    if (!nulls) {
-      continue;
-    }
-
-    if (partitionedVector->indices()) {
-      // Remap nulls using the indices
-      auto indicesBuffer = partitionedVector->indices();
-      auto* indices = indicesBuffer->asMutable<vector_size_t>();
-
-      ensureCapacity<char>(swappingBuffer_, numBytes, pool_, false, true);
-      auto* swappingBuffer = swappingBuffer_->asMutable<uint8_t>();
-      for (auto i = 0; i < numRows; i++) {
-        size_t srcByte = i / 8;
-        uint8_t srcBit = i - srcByte * 8;
-
-        // Determine the destination byte and bit positions
-        auto destIndice = indices[i];
-        size_t destByte = destIndice / 8;
-        uint8_t destBit = destIndice - destByte * 8;
-
-        // Extract the bit from the source position and set it at the
-        // destination
-        swappingBuffer[destByte] |= ((nulls[srcByte] >> srcBit) & 1) << destBit;
-      }
-      nulls = swappingBuffer;
-    }
-
+  for (const auto& partitionedVector : partitionedVectors) {
     const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
+    const auto* rawNulls = partitionedVector->baseVector()->rawNulls();
+    const auto* indices = partitionedVector->indices()
+        ? partitionedVector->indices()->as<vector_size_t>()
+        : nullptr;
 
-    vector_size_t lastBit = 0;
-    for (auto p = 0; p < numPartitions_; ++p) {
-      int startBit = lastBit;
-      int endBit = partitionOffsets[p];
-      int numBitsInPartition = endBit - startBit;
-
-      if (numBitsInPartition <= 0) {
-        continue; // Skip empty partitions
+    vector_size_t partitionBegin = 0;
+    for (int destination = 0; destination < numPartitions_; ++destination) {
+      if (!mayHaveNullsForPartition_[destination]) {
+        partitionBegin = partitionOffsets[destination];
+        continue;
       }
 
-      int startByte = startBit / 8;
-      int startBitOffset = startBit - startByte * 8;
-      int endByte = (endBit - 1) / 8;
-      int endBitOffset = endBit - endByte * 8;
+      const auto partitionEnd = partitionOffsets[destination];
+      for (auto row = partitionBegin; row < partitionEnd; ++row) {
+        const auto sourceRow = indices ? indices[row] : row;
+        const bool isNotNull =
+            (rawNulls == nullptr) || bits::isBitSet(rawNulls, sourceRow);
 
-      int bitOffset = startBitOffset;
-      uint8_t currentByte = nulls[startByte];
-
-      // Handle carry-over from the previous p
-      uint8_t& carry = carryOver[p];
-      uint8_t& numCarryBits = carryOverBits[p];
-
-      int bitsToTake = std::min(8 - numCarryBits, numBitsInPartition);
-      uint8_t mask = (1 << bitsToTake) - 1;
-      uint8_t bits = (currentByte >> bitOffset) & mask;
-      carry |= (bits << numCarryBits);
-      numCarryBits += bitsToTake;
-      bitOffset += bitsToTake;
-
-      // Write full bytes from carry-over
-      int writeCondition = (numCarryBits == 8);
-      numCarryBits *= (1 - writeCondition); // Reset to 0 if writing
-      outputStreams[p].write(
-          reinterpret_cast<const char*>(&carry), writeCondition);
-      carry *= (1 - writeCondition); // Reset to 0 if writing
-
-      numBitsInPartition -= bitsToTake;
-      bitOffset *=
-          (numBitsInPartition > 0); // Reset to 0 if no more bits to process
-      startByte +=
-          (bitOffset == 0 &&
-           numBitsInPartition > 0); // Move to next byte if needed
-      currentByte =
-          static_cast<uint8_t>(nulls[startByte]) * (startByte <= endByte);
-
-      // Process full bytes
-      while (numBitsInPartition >= 8) {
-        uint8_t nextByte = static_cast<uint8_t>(nulls[startByte + 1]) *
-            (startByte + 1 <= endByte);
-        uint8_t combinedByte =
-            (currentByte >> bitOffset) | (nextByte << (8 - bitOffset));
-        outputStreams[p].write(reinterpret_cast<const char*>(&combinedByte), 1);
-        numBitsInPartition -= 8;
-        startByte += 1;
-        currentByte =
-            static_cast<uint8_t>(nulls[startByte]) * (startByte <= endByte);
+        pendingByte[destination] |=
+            static_cast<uint8_t>(isNotNull) << pendingBits[destination];
+        ++pendingBits[destination];
+        if (pendingBits[destination] == 8) {
+          flushByte(destination, pendingByte[destination]);
+          pendingByte[destination] = 0;
+          pendingBits[destination] = 0;
+        }
       }
-
-      // Handle remaining bits
-      mask = (1 << numBitsInPartition) - 1;
-      bits = (currentByte >> bitOffset) & mask;
-      carry = bits;
-      numCarryBits = numBitsInPartition;
+      partitionBegin = partitionEnd;
     }
   }
 
-  // Flush remaining carry-over bits
-  for (size_t p = 0; p < numPartitions_; ++p) {
-    if (carryOverBits[p] > 0) {
-      outputStreams[p].write(reinterpret_cast<const char*>(&carryOver[p]), 1);
-      carryOver[p] = 0;
-      carryOverBits[p] = 0;
+  for (int destination = 0; destination < numPartitions_; ++destination) {
+    if (mayHaveNullsForPartition_[destination] && pendingBits[destination] > 0) {
+      flushByte(destination, pendingByte[destination]);
     }
   }
 }
@@ -753,12 +737,13 @@ void IterativePartitioningSerializer::flushFlatVectorValues(
   const auto* values =
       flatVector->baseVector()->template as<FlatVector<T>>()->rawValues();
   const auto* offsets = flatVector->rawPartitionOffsets();
+  const auto* rawNulls = flatVector->baseVector()->rawNulls();
 
   if (!flatVector->indices()) {
-    flushFlatValues<T>(values, offsets, outputStreams);
+    flushFlatValues<T>(values, offsets, rawNulls, outputStreams);
   } else {
     auto* indices = flatVector->indices()->template as<vector_size_t>();
-    reMapAndFlushFlatValues<T>(values, offsets, indices, outputStreams);
+    reMapAndFlushFlatValues<T>(values, offsets, indices, rawNulls, outputStreams);
   }
 }
 
@@ -766,16 +751,18 @@ template <typename T>
 void IterativePartitioningSerializer::flushFlatValues(
     const T* partitionedValues,
     const vector_size_t* partitionOffsets,
+    const uint64_t* rawNulls,
     std::vector<IOBufOutputStream>& outputStreams) {
-  auto typeWidth = sizeof(T);
-
   auto lastOffset = 0;
   for (int p = 0; p < numPartitions_; p++) {
     auto offset = partitionOffsets[p];
-    auto numValues = offset - lastOffset;
-    outputStreams[p].write(
-        reinterpret_cast<const char*>(&partitionedValues[lastOffset]),
-        numValues * typeWidth);
+    for (auto i = lastOffset; i < offset; ++i) {
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, i)) {
+        continue;
+      }
+      outputStreams[p].write(
+          reinterpret_cast<const char*>(&partitionedValues[i]), sizeof(T));
+    }
     lastOffset = offset;
   }
 }
@@ -785,16 +772,19 @@ void IterativePartitioningSerializer::reMapAndFlushFlatValues(
     const T* values,
     const vector_size_t* partitionOffsets,
     const vector_size_t* partitionedIndices,
+    const uint64_t* rawNulls,
     std::vector<IOBufOutputStream>& outputStreams) {
-  auto typeWidth = sizeof(T);
   auto lastOffset = 0;
   for (int p = 0; p < numPartitions_; p++) {
     auto indicesOffset = partitionOffsets[p];
 
     for (auto i = lastOffset; i < indicesOffset; ++i) {
+      const auto sourceRow = partitionedIndices[i];
+      if (rawNulls != nullptr && bits::isBitNull(rawNulls, sourceRow)) {
+        continue;
+      }
       outputStreams[p].write(
-          reinterpret_cast<const char*>(&values[partitionedIndices[i]]),
-          typeWidth);
+          reinterpret_cast<const char*>(&values[sourceRow]), sizeof(T));
     }
 
     lastOffset = indicesOffset;

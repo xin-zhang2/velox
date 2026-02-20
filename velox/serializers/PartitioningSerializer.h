@@ -121,6 +121,7 @@ class IterativePartitioningSerializer {
   void flushFlatValues(
       const T* partitionedValues,
       const vector_size_t* partitionOffsets,
+      const uint64_t* rawNulls,
       std::vector<IOBufOutputStream>& outputStreams);
 
   template <typename T>
@@ -128,6 +129,7 @@ class IterativePartitioningSerializer {
       const T* values,
       const vector_size_t* partitionOffsets,
       const vector_size_t* partitionedIndices,
+      const uint64_t* rawNulls,
       std::vector<IOBufOutputStream>& outputStreams);
 
   void flushDictionaryVectors(
@@ -196,6 +198,7 @@ class IterativePartitioningSerializer {
 
   std::vector<PartitionedVectorPtr> tempVectors_;
   std::vector<PartitionedVectorPtr> partitionedPages_;
+  std::vector<char> mayHaveNullsForPartition_;
 
   std::vector<char> flushingHeader_;
   std::vector<vector_size_t> topRowCounts_;

@@ -15,6 +15,8 @@
  */
 #include "velox/serializers/PrestoSerializerDeserializationUtils.h"
 
+#include <cctype>
+
 #include "velox/functions/prestosql/types/UuidType.h"
 
 namespace facebook::velox::serializer::presto::detail {
@@ -184,6 +186,39 @@ std::string readLengthPrefixedString(ByteInputStream* source) {
   value.resize(size);
   source->readBytes(&value[0], size);
   return value;
+}
+
+std::string hexPreview(const std::string_view& text, size_t maxBytes = 32) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  const auto bytes = std::min(maxBytes, text.size());
+  std::string out;
+  out.reserve(bytes * 3 + 3);
+  for (size_t i = 0; i < bytes; ++i) {
+    const auto c = static_cast<uint8_t>(text[i]);
+    out.push_back(kHex[(c >> 4) & 0x0F]);
+    out.push_back(kHex[c & 0x0F]);
+    if (i + 1 != bytes) {
+      out.push_back(' ');
+    }
+  }
+  if (text.size() > bytes) {
+    out.append("...");
+  }
+  return out;
+}
+
+std::string printablePreview(const std::string_view& text, size_t maxBytes = 32) {
+  const auto bytes = std::min(maxBytes, text.size());
+  std::string out;
+  out.reserve(bytes);
+  for (size_t i = 0; i < bytes; ++i) {
+    const auto c = static_cast<unsigned char>(text[i]);
+    out.push_back(std::isprint(c) ? static_cast<char>(c) : '.');
+  }
+  if (text.size() > bytes) {
+    out.append("...");
+  }
+  return out;
 }
 
 void readConstantVectorStructNulls(
@@ -1314,7 +1349,21 @@ void readColumns(
     const auto& columnType = types[i];
     auto& columnResult = results[i];
 
+    const int64_t encodingStart = source->tellp();
     const auto encoding = readLengthPrefixedString(source);
+    const int64_t encodingEnd = source->tellp();
+    if (VLOG_IS_ON(1)) {
+      VLOG(1) << fmt::format(
+          "readColumns: col={} type={} encoding='{}' hex=[{}] printable='{}' "
+          "start={} end={}",
+          i,
+          columnType->kindName(),
+          encoding,
+          hexPreview(encoding),
+          printablePreview(encoding),
+          encodingStart,
+          encodingEnd);
+    }
     if (encoding == kRLE) {
       readConstantVector(
           source,
@@ -1338,6 +1387,17 @@ void readColumns(
     } else {
       auto typeToEncoding = typeToEncodingName(columnType);
       if (encoding != typeToEncoding) {
+        LOG(ERROR) << fmt::format(
+            "readColumns encoding mismatch: col={} type={} expected='{}' got='{}' "
+            "hex=[{}] printable='{}' encodingStart={} position={}",
+            i,
+            columnType->kindName(),
+            typeToEncoding,
+            encoding,
+            hexPreview(encoding),
+            printablePreview(encoding),
+            encodingStart,
+            encodingEnd);
         if (encoding == kByteArray &&
             tryReadNullColumn(
                 source,

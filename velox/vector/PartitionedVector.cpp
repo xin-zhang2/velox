@@ -474,6 +474,23 @@ PartitionedVectorPtr PartitionedVector::create(
           numRows,
           "ROW partition offsets final value must equal numRows");
 
+      // Keep top-level row nulls in the same partitioned order as children.
+      // Row vectors don't have value buffers to partition, but null flags
+      // must still be permuted by destination.
+      if (numPartitions > 1) {
+        char* rawNulls =
+            reinterpret_cast<char*>(vector->mutableRawNulls());
+        if (rawNulls) {
+          partitionBitsInPlace(
+              rawNulls,
+              topRowPartitions,
+              numPartitions,
+              beginPartitionOffsetsBuffer,
+              endPartitionOffsetsBuffer,
+              pool);
+        }
+      }
+
       auto rowVectorPtr = vector->as<RowVector>();
       std::vector<PartitionedVectorPtr> children;
       children.reserve(rowVectorPtr->childrenSize());
@@ -591,6 +608,27 @@ PartitionedVectorPtr PartitionedVector::create(
     }
 
     case VectorEncoding::Simple::DICTIONARY: {
+      // Dictionary can introduce wrapper-level nulls that are independent of
+      // the base value vector. The optimized wrapped path doesn't preserve
+      // these nulls end-to-end and can produce a wire-format mismatch.
+      // Materialize null dictionaries to keep null semantics correct.
+      if (vector->mayHaveNulls()) {
+        auto materialized = BaseVector::create(vector->type(), numRows, pool);
+        materialized->copy(vector.get(), 0, 0, numRows);
+        return PartitionedVector::create(
+            materialized,
+            topRowPartitions,
+            topRowOffsetsForCurrentLevel,
+            topRowOffsetsForNextLevelBuffer,
+            lastTopRowOffset,
+            numPartitions,
+            beginPartitionOffsetsBuffer,
+            endPartitionOffsetsBuffer,
+            swappingBuffer,
+            nestLevel,
+            pool);
+      }
+
       initializeBeginPartitionOffsets(
           beginPartitionOffsetsBuffer,
           endPartitionOffsetsBuffer,
@@ -602,6 +640,31 @@ PartitionedVectorPtr PartitionedVector::create(
           vector,
           topRowPartitions,
           topRowOffsetsForCurrentLevel,
+          lastTopRowOffset,
+          numPartitions,
+          beginPartitionOffsetsBuffer,
+          endPartitionOffsetsBuffer,
+          swappingBuffer,
+          nestLevel,
+          pool);
+    }
+    case VectorEncoding::Simple::CONSTANT: {
+      auto singleValueVector = BaseVector::create(vector->type(), 1, pool);
+      singleValueVector->copy(vector.get(), 0, 0, 1);
+
+      auto indices = AlignedBuffer::allocate<vector_size_t>(numRows, pool);
+      std::fill(
+          indices->asMutable<vector_size_t>(),
+          indices->asMutable<vector_size_t>() + numRows,
+          0);
+
+      auto dictionaryVector = BaseVector::wrapInDictionary(
+          nullptr, indices, numRows, singleValueVector);
+      return PartitionedVector::create(
+          dictionaryVector,
+          topRowPartitions,
+          topRowOffsetsForCurrentLevel,
+          topRowOffsetsForNextLevelBuffer,
           lastTopRowOffset,
           numPartitions,
           beginPartitionOffsetsBuffer,
