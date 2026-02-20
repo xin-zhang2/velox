@@ -20,6 +20,7 @@
 
 #include "velox/exec/HashPartitionFunction.h"
 #include "velox/exec/Task.h"
+#include "velox/common/time/Timer.h"
 
 namespace facebook::velox::exec {
 
@@ -95,6 +96,13 @@ BlockingReason OptimizedPartitionedOutput::isBlocked(ContinueFuture* future) {
 }
 
 void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
+  ++addInputCalls_;
+  if (VLOG_IS_ON(1)) {
+    VLOG(1) << "OptimizedPartitionedOutput addInput. taskId=" << taskId_
+            << " driverId=" << operatorCtx_->driverCtx()->driverId
+            << " addInputCalls=" << addInputCalls_
+            << " rows=" << input->size();
+  }
   // VLOG(0) << "OptimizedPartitionedOutput::addInput Adding input " <<
   // input->size() << " rows.";
   // TODO: replicateNullsAndAny_
@@ -131,6 +139,16 @@ void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
 }
 
 RowVectorPtr OptimizedPartitionedOutput::getOutput() {
+  ++getOutputCalls_;
+  if (VLOG_IS_ON(1) && (getOutputCalls_ <= 10 || noMoreInput_)) {
+    VLOG(1) << "OptimizedPartitionedOutput getOutput. taskId=" << taskId_
+            << " driverId=" << operatorCtx_->driverCtx()->driverId
+            << " getOutputCalls=" << getOutputCalls_
+            << " noMoreInput=" << noMoreInput_
+            << " finished=" << finished_
+            << " bytesBuffered=" << serializer_->bytesBuffered()
+            << " rowsBuffered=" << serializer_->rowsBuffered();
+  }
   // VLOG(0) << "OptimizedPartitionedOutput::getOutput begin finished_: " <<
   // finished_;
   if (finished_) {
@@ -154,6 +172,11 @@ RowVectorPtr OptimizedPartitionedOutput::getOutput() {
       lockedStats->addRuntimeStat(pair.first, pair.second);
     }
 
+    VLOG(1) << "OptimizedPartitionedOutput noMoreInput -> noMoreData. taskId="
+            << operatorCtx_->task()->taskId()
+            << " driverId=" << operatorCtx_->driverCtx()->driverId
+            << " operatorId=" << operatorCtx_->operatorId()
+            << " bufferedBytes=" << serializer_->bytesBuffered();
     bufferManager_.lock()->noMoreData(operatorCtx_->task()->taskId());
     finished_ = true;
   }
@@ -167,8 +190,24 @@ bool OptimizedPartitionedOutput::isFinished() {
 }
 
 void OptimizedPartitionedOutput::flush() {
+  ++flushCalls_;
+  const auto flushStartMs = getCurrentTimeMs();
+  const auto driverId = operatorCtx_->driverCtx()->driverId;
+  SCOPE_EXIT {
+    VLOG(1) << "OptimizedPartitionedOutput flush exit. taskId=" << taskId_
+            << " driverId=" << driverId
+            << " flushCalls=" << flushCalls_
+            << " elapsedMs=" << (getCurrentTimeMs() - flushStartMs);
+  };
   auto flushedBytes = serializer_->bytesBuffered();
   auto flushedRows = serializer_->rowsBuffered();
+  if (VLOG_IS_ON(1)) {
+    VLOG(1) << "OptimizedPartitionedOutput flush begin. taskId=" << taskId_
+            << " driverId=" << operatorCtx_->driverCtx()->driverId
+            << " flushCalls=" << flushCalls_
+            << " flushedBytes=" << flushedBytes
+            << " flushedRows=" << flushedRows;
+  }
   // VLOG(0) << "OptimizedPartitionedOutput::flush begin flushedBytes" <<
   // flushedBytes << " flushedRows:"
   //                << flushedRows;
@@ -186,15 +225,63 @@ void OptimizedPartitionedOutput::flush() {
     //                    taskId_;
     numSerializedPages_++;
     if (serializedPage && serializedPage->numRows() > 0) {
+      const auto pageBytes = serializedPage->size();
+      const auto pageRows = serializedPage->numRows().value_or(-1);
       serializedPageSizes_.push_back(serializedPage->size());
       numNonZeroSerializedPages_++;
+      VLOG(1) << "OptimizedPartitionedOutput enqueue begin. taskId=" << taskId_
+              << " driverId=" << driverId << " destination=" << destination
+              << " pageBytes=" << pageBytes << " pageRows=" << pageRows;
+      LOG(INFO) << "OptimizedPartitionedOutput enqueue begin. taskId="
+                << taskId_ << " driverId=" << driverId
+                << " destination=" << destination << " pageBytes=" << pageBytes
+                << " pageRows=" << pageRows;
 
-      bool blocked = bufferManager_.lock()->enqueue(
+      const auto enqueueStartMs = getCurrentTimeMs();
+      auto outputBufferManager = bufferManager_.lock();
+      LOG(INFO) << "OptimizedPartitionedOutput bufferManager lock. taskId="
+                << taskId_ << " driverId=" << driverId
+                << " destination=" << destination
+                << " hasManager=" << (outputBufferManager != nullptr);
+      VELOX_CHECK_NOT_NULL(
+          outputBufferManager,
+          "OutputBufferManager is null. taskId={}, driverId={}, destination={}",
+          taskId_,
+          driverId,
+          destination);
+      bool blocked = outputBufferManager->enqueue(
           taskId_, destination, std::move(serializedPage), &future_);
+      const auto enqueueElapsedMs = getCurrentTimeMs() - enqueueStartMs;
+      VLOG(1) << "OptimizedPartitionedOutput enqueue end. taskId=" << taskId_
+              << " driverId=" << driverId << " destination=" << destination
+              << " blocked=" << blocked
+              << " futureValid=" << future_.valid()
+              << " enqueueElapsedMs=" << enqueueElapsedMs;
+      LOG(INFO) << "OptimizedPartitionedOutput enqueue end. taskId=" << taskId_
+                << " driverId=" << driverId << " destination=" << destination
+                << " blocked=" << blocked
+                << " futureValid=" << future_.valid()
+                << " enqueueElapsedMs=" << enqueueElapsedMs;
+      if (enqueueElapsedMs > 100) {
+        LOG(WARNING) << "OptimizedPartitionedOutput slow enqueue. taskId="
+                     << taskId_ << " driverId=" << driverId
+                     << " destination=" << destination
+                     << " enqueueElapsedMs=" << enqueueElapsedMs;
+      }
       if (blocked) {
+        VLOG(1) << "OptimizedPartitionedOutput enqueue blocked. taskId="
+                << taskId_ << " driverId=" << operatorCtx_->driverCtx()->driverId
+                << " destination=" << destination
+                << " serializedBytes=" << serializedPageSizes_.back();
         blockingReason_ = BlockingReason::kWaitForConsumer;
       }
     }
+  }
+  if (VLOG_IS_ON(1)) {
+    VLOG(1) << "OptimizedPartitionedOutput flush end. taskId=" << taskId_
+            << " driverId=" << operatorCtx_->driverCtx()->driverId
+            << " nonZeroPages=" << numNonZeroSerializedPages_
+            << " totalSerializedPages=" << numSerializedPages_;
   }
 }
 

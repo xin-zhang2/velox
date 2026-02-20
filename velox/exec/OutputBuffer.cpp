@@ -144,6 +144,10 @@ DestinationBuffer::Data DestinationBuffer::getData(
       notifySequence_ = sequence;
     }
     notifyMaxBytes_ = maxBytes;
+    if (sequence == 0 && sequence_ == 0) {
+      VLOG(1) << "DestinationBuffer waiting at sequence 0. maxBytes="
+              << maxBytes << " bufferedPages=" << data_.size();
+    }
     return {};
   }
 
@@ -337,6 +341,10 @@ OutputBuffer::OutputBuffer(
       arbitraryBuffer_(
           isArbitrary() ? std::make_unique<ArbitraryBuffer>() : nullptr),
       numDrivers_(numDrivers) {
+  VLOG(1) << "OutputBuffer created. taskId=" << task_->taskId()
+          << " kind=" << static_cast<int32_t>(kind_)
+          << " numDestinations=" << numDestinations
+          << " numDrivers=" << numDrivers_;
   buffers_.reserve(numDestinations);
   for (int i = 0; i < numDestinations; i++) {
     buffers_.push_back(std::make_unique<DestinationBuffer>());
@@ -448,13 +456,38 @@ bool OutputBuffer::enqueue(
     int destination,
     std::unique_ptr<SerializedPageBase> data,
     ContinueFuture* future) {
+  LOG(INFO) << "OutputBuffer::enqueue enter. taskId=" << task_->taskId()
+            << " destination=" << destination
+            << " dataPtr=" << static_cast<const void*>(data.get());
   VELOX_CHECK_NOT_NULL(data);
+  LOG(INFO) << "OutputBuffer::enqueue before isRunning. taskId="
+            << task_->taskId() << " destination=" << destination;
+  const bool running = task_->isRunning();
+  LOG(INFO) << "OutputBuffer::enqueue after isRunning. taskId="
+            << task_->taskId() << " destination=" << destination
+            << " running=" << running;
   VELOX_CHECK(
-      task_->isRunning(), "Task is terminated, cannot add data to output.");
+      running, "Task is terminated, cannot add data to output.");
+  const auto enqueueStartMs = getCurrentTimeMs();
+  const auto pageBytes = data->size();
+  const auto pageRows = data->numRows().value_or(-1);
+  VLOG(1) << "OutputBuffer::enqueue begin. taskId=" << task_->taskId()
+          << " destination=" << destination << " pageBytes=" << pageBytes
+          << " pageRows=" << pageRows;
+  LOG(INFO) << "OutputBuffer::enqueue begin. taskId=" << task_->taskId()
+            << " destination=" << destination << " pageBytes=" << pageBytes
+            << " pageRows=" << pageRows;
   std::vector<DataAvailable> dataAvailableCallbacks;
   bool blocked = false;
   {
+    const auto lockStartMs = getCurrentTimeMs();
     std::lock_guard<std::mutex> l(mutex_);
+    const auto lockWaitMs = getCurrentTimeMs() - lockStartMs;
+    if (lockWaitMs > 100) {
+      LOG(WARNING) << "OutputBuffer::enqueue slow mutex wait. taskId="
+                   << task_->taskId() << " destination=" << destination
+                   << " waitMs=" << lockWaitMs;
+    }
     VELOX_CHECK_LT(destination, buffers_.size());
 
     updateStatsWithEnqueuedPageLocked(data->size(), data->numRows().value());
@@ -482,11 +515,43 @@ bool OutputBuffer::enqueue(
       *future = promises_.back().getSemiFuture();
       blocked = true;
     }
+
+    VLOG(1) << "OutputBuffer::enqueue locked section done. taskId="
+            << task_->taskId() << " destination=" << destination
+            << " blocked=" << blocked
+            << " callbacks=" << dataAvailableCallbacks.size()
+            << " bufferedBytes=" << bufferedBytes_;
   }
 
   // Outside mutex_.
+  const auto notifyStartMs = getCurrentTimeMs();
   for (auto& callback : dataAvailableCallbacks) {
+    const auto oneNotifyStartMs = getCurrentTimeMs();
     callback.notify();
+    const auto oneNotifyMs = getCurrentTimeMs() - oneNotifyStartMs;
+    if (oneNotifyMs > 100) {
+      LOG(WARNING) << "OutputBuffer::enqueue slow callback notify. taskId="
+                   << task_->taskId() << " destination=" << destination
+                   << " notifyMs=" << oneNotifyMs;
+    }
+  }
+  const auto notifyElapsedMs = getCurrentTimeMs() - notifyStartMs;
+  const auto enqueueElapsedMs = getCurrentTimeMs() - enqueueStartMs;
+  VLOG(1) << "OutputBuffer::enqueue end. taskId=" << task_->taskId()
+          << " destination=" << destination << " blocked=" << blocked
+          << " futureValid=" << (future ? future->valid() : false)
+          << " notifyElapsedMs=" << notifyElapsedMs
+          << " enqueueElapsedMs=" << enqueueElapsedMs;
+  LOG(INFO) << "OutputBuffer::enqueue end. taskId=" << task_->taskId()
+            << " destination=" << destination << " blocked=" << blocked
+            << " futureValid=" << (future ? future->valid() : false)
+            << " notifyElapsedMs=" << notifyElapsedMs
+            << " enqueueElapsedMs=" << enqueueElapsedMs;
+  if (enqueueElapsedMs > 100) {
+    LOG(WARNING) << "OutputBuffer::enqueue slow end-to-end. taskId="
+                 << task_->taskId() << " destination=" << destination
+                 << " enqueueElapsedMs=" << enqueueElapsedMs
+                 << " callbacks=" << dataAvailableCallbacks.size();
   }
 
   return blocked;
@@ -576,6 +641,9 @@ void OutputBuffer::checkIfDone(bool oneDriverFinished) {
     std::lock_guard<std::mutex> l(mutex_);
     if (oneDriverFinished) {
       ++numFinished_;
+      VLOG(1) << "OutputBuffer noMoreData from one driver. taskId="
+              << task_->taskId() << " finishedDrivers=" << numFinished_
+              << "/" << numDrivers_;
     }
     VELOX_CHECK_LE(
         numFinished_,
@@ -583,8 +651,13 @@ void OutputBuffer::checkIfDone(bool oneDriverFinished) {
         "Each driver should call noMoreData exactly once");
     atEnd_ = numFinished_ == numDrivers_;
     if (!atEnd_) {
+      VLOG(1) << "OutputBuffer not at end yet. taskId=" << task_->taskId()
+              << " finishedDrivers=" << numFinished_ << "/" << numDrivers_;
       return;
     }
+    VLOG(1) << "OutputBuffer at end. taskId=" << task_->taskId()
+            << " kind=" << static_cast<int32_t>(kind_)
+            << " destinations=" << buffers_.size();
     if (isArbitrary()) {
       arbitraryBuffer_->noMoreData();
       for (auto& buffer : buffers_) {
@@ -730,6 +803,11 @@ void OutputBuffer::getData(
     VELOX_CHECK_LT(destination, buffers_.size());
     auto* buffer = buffers_[destination].get();
     if (buffer) {
+      if (sequence == 0) {
+        VLOG(1) << "OutputBuffer getData sequence 0. taskId=" << task_->taskId()
+                << " destination=" << destination
+                << " maxBytes=" << maxBytes;
+      }
       freed = buffer->acknowledge(sequence, true);
       updateAfterAcknowledgeLocked(freed, promises);
       data = buffer->getData(

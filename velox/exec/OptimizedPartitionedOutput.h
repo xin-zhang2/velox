@@ -103,6 +103,9 @@ class OptimizedPartitionedOutput : public Operator {
   std::vector<int64_t> serializedPageSizes_;
   int64_t numSerializedPages_ = 0;
   int64_t numNonZeroSerializedPages_ = 0;
+  int64_t addInputCalls_{0};
+  int64_t getOutputCalls_{0};
+  int64_t flushCalls_{0};
 };
 
 } // namespace facebook::velox::exec

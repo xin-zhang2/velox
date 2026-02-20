@@ -2119,7 +2119,17 @@ bool Task::allSplitsConsumed(const core::PlanNode* planNode) const {
 }
 
 bool Task::isRunning() const {
-  std::lock_guard<std::timed_mutex> l(mutex_);
+  const auto waitStartMs = getCurrentTimeMs();
+  std::unique_lock<std::timed_mutex> l(mutex_, std::defer_lock);
+  while (!l.try_lock_for(std::chrono::milliseconds(1000))) {
+    LOG(WARNING) << "Task::isRunning waiting for task mutex. taskId=" << taskId_
+                 << " waitMs=" << (getCurrentTimeMs() - waitStartMs);
+  }
+  const auto waitMs = getCurrentTimeMs() - waitStartMs;
+  if (waitMs > 100) {
+    LOG(WARNING) << "Task::isRunning slow mutex acquisition. taskId="
+                 << taskId_ << " waitMs=" << waitMs;
+  }
   return isRunningLocked();
 }
 
@@ -2659,16 +2669,20 @@ void Task::addDriverStats(int pipelineId, DriverStats stats) {
 }
 
 TaskStats Task::taskStats() const {
-  std::lock_guard<std::timed_mutex> l(mutex_);
+  // Take a snapshot under task mutex, then collect operator stats outside the
+  // lock to avoid lock-order inversion with operator internals.
+  TaskStats taskStats;
+  std::vector<std::shared_ptr<Driver>> driversSnapshot;
+  {
+    std::lock_guard<std::timed_mutex> l(mutex_);
+    taskStats = taskStats_;
+    driversSnapshot = drivers_;
+  }
 
-  // 'taskStats_' contains task stats plus stats for the completed drivers
-  // (their operators).
-  TaskStats taskStats = taskStats_;
-
-  taskStats.numTotalDrivers = drivers_.size();
+  taskStats.numTotalDrivers = driversSnapshot.size();
 
   // Add stats of the drivers (their operators) that are still running.
-  for (const auto& driver : drivers_) {
+  for (const auto& driver : driversSnapshot) {
     // Driver can be null.
     if (driver == nullptr) {
       ++taskStats.numCompletedDrivers;

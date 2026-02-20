@@ -34,10 +34,18 @@ const std::shared_ptr<OutputBufferManager>& OutputBufferManager::getInstanceRef(
 
 std::shared_ptr<OutputBuffer> OutputBufferManager::getBuffer(
     const std::string& taskId) {
+  const auto lockStartMs = getCurrentTimeMs();
   return buffers_.withLock([&](auto& buffers) {
+    const auto lockWaitMs = getCurrentTimeMs() - lockStartMs;
+    if (lockWaitMs > 100) {
+      LOG(WARNING) << "OutputBufferManager::getBuffer slow lock wait. taskId="
+                   << taskId << " waitMs=" << lockWaitMs;
+    }
     auto it = buffers.find(taskId);
     VELOX_CHECK(
         it != buffers.end(), "Output buffers for task not found: {}", taskId);
+    VLOG(1) << "OutputBufferManager::getBuffer acquired. taskId=" << taskId
+            << " waitMs=" << lockWaitMs;
     return it->second;
   });
 }
@@ -59,7 +67,35 @@ bool OutputBufferManager::enqueue(
     int destination,
     std::unique_ptr<SerializedPageBase> data,
     ContinueFuture* future) {
-  return getBuffer(taskId)->enqueue(destination, std::move(data), future);
+  const auto beginMs = getCurrentTimeMs();
+  VLOG(1) << "OutputBufferManager::enqueue begin. taskId=" << taskId
+          << " destination=" << destination << " pageBytes=" << data->size();
+  LOG(INFO) << "OutputBufferManager::enqueue begin. taskId=" << taskId
+            << " destination=" << destination << " pageBytes=" << data->size();
+  auto buffer = getBuffer(taskId);
+  VLOG(1) << "OutputBufferManager::enqueue got buffer. taskId=" << taskId
+          << " destination=" << destination
+          << " elapsedMs=" << (getCurrentTimeMs() - beginMs);
+  LOG(INFO) << "OutputBufferManager::enqueue got buffer. taskId=" << taskId
+            << " destination=" << destination
+            << " elapsedMs=" << (getCurrentTimeMs() - beginMs);
+  const auto enqueueStartMs = getCurrentTimeMs();
+  auto blocked = buffer->enqueue(destination, std::move(data), future);
+  const auto enqueueElapsedMs = getCurrentTimeMs() - enqueueStartMs;
+  VLOG(1) << "OutputBufferManager::enqueue end. taskId=" << taskId
+          << " destination=" << destination << " blocked=" << blocked
+          << " enqueueElapsedMs=" << enqueueElapsedMs
+          << " totalElapsedMs=" << (getCurrentTimeMs() - beginMs);
+  LOG(INFO) << "OutputBufferManager::enqueue end. taskId=" << taskId
+            << " destination=" << destination << " blocked=" << blocked
+            << " enqueueElapsedMs=" << enqueueElapsedMs
+            << " totalElapsedMs=" << (getCurrentTimeMs() - beginMs);
+  if (enqueueElapsedMs > 100) {
+    LOG(WARNING) << "OutputBufferManager::enqueue slow buffer enqueue. taskId="
+                 << taskId << " destination=" << destination
+                 << " enqueueElapsedMs=" << enqueueElapsedMs;
+  }
+  return blocked;
 }
 
 void OutputBufferManager::noMoreData(const std::string& taskId) {

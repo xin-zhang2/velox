@@ -195,15 +195,28 @@ void IterativePartitioningSerializer::append(
 
   auto* partitionOffsets = partitionedPage->rawPartitionOffsets();
   vector_size_t offset = 0;
+  vector_size_t totalRowsInPartitions = 0;
   for (auto i = 0; i < numPartitions_; i++) {
-    topRowCounts_[i] += partitionOffsets[i] - offset;
+    const auto rowsInPartition = partitionOffsets[i] - offset;
+    topRowCounts_[i] += rowsInPartition;
+    totalRowsInPartitions += rowsInPartition;
     offset = partitionOffsets[i];
   }
+  VELOX_CHECK_EQ(
+      totalRowsInPartitions,
+      numRows,
+      "IterativePartitioningSerializer partition row count mismatch");
 
   partitionedPages_.emplace_back(partitionedPage);
 
   bytesBuffered_ += output->inMemoryBytes();
   rowsBuffered_ += numRows;
+  if (VLOG_IS_ON(1)) {
+    VLOG(1) << "IterativePartitioningSerializer append. rows=" << numRows
+            << " bytesBuffered=" << bytesBuffered_
+            << " rowsBuffered=" << rowsBuffered_
+            << " bufferedPages=" << partitionedPages_.size();
+  }
 }
 
 std::map<uint32_t, std::unique_ptr<exec::SerializedPage>>
@@ -211,7 +224,16 @@ IterativePartitioningSerializer::flushUncompressed() {
   //  VLOG(0) << "IterativePartitioningSerializer::flush begin ";
 
   if (partitionedPages_.empty()) {
+    if (VLOG_IS_ON(1)) {
+      VLOG(1)
+          << "IterativePartitioningSerializer flush skipped: no buffered pages";
+    }
     return std::map<uint32_t, std::unique_ptr<exec::SerializedPage>>();
+  }
+  if (VLOG_IS_ON(1)) {
+    VLOG(1) << "IterativePartitioningSerializer flush begin. rowsBuffered="
+            << rowsBuffered_ << " bytesBuffered=" << bytesBuffered_
+            << " bufferedPages=" << partitionedPages_.size();
   }
 
   char codecMask = 0;
@@ -242,6 +264,7 @@ IterativePartitioningSerializer::flushUncompressed() {
   flushPartitionedRowChildren(partitionedPages_, 0, outputStreams);
 
   std::map<uint32_t, std::unique_ptr<exec::SerializedPage>> serializedPages;
+  int64_t totalFlushedRowsThisRound{0};
   for (uint32_t destination = 0; destination < numPartitions_; destination++) {
     auto& out = outputStreams[destination];
     flushFinish(out, destination, beginOffsets[destination], codecMask);
@@ -253,6 +276,7 @@ IterativePartitioningSerializer::flushUncompressed() {
           out.getIOBuf(bufferReleaseFn_),
           nullptr,
           topRowCounts_[destination]);
+      totalFlushedRowsThisRound += topRowCounts_[destination];
 
       totalFlushedBytes_ += flushedBytes;
       totalFlushedRows_ += topRowCounts_[destination];
@@ -260,6 +284,13 @@ IterativePartitioningSerializer::flushUncompressed() {
       totalNumRanges_ += ranges.size();
     }
   }
+  VELOX_CHECK_EQ(
+      totalFlushedRowsThisRound,
+      rowsBuffered_,
+      "IterativePartitioningSerializer flushed row count mismatch");
+  VELOX_CHECK(
+      rowsBuffered_ == 0 || !serializedPages.empty(),
+      "IterativePartitioningSerializer has buffered rows but produced no serialized pages");
 
   numFlushes_++;
   numSerializedPages_ += serializedPages.size();
@@ -268,6 +299,11 @@ IterativePartitioningSerializer::flushUncompressed() {
   rowsBuffered_ = 0;
   topRowCounts_.assign(topRowCounts_.size(), 0);
   partitionedPages_.clear();
+  if (VLOG_IS_ON(1)) {
+    VLOG(1) << "IterativePartitioningSerializer flush end. serializedPages="
+            << serializedPages.size()
+            << " flushedRows=" << totalFlushedRowsThisRound;
+  }
 
   return serializedPages;
 }

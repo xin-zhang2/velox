@@ -418,6 +418,12 @@ PartitionedVectorPtr PartitionedVector::create(
   auto numRows = vector->size();
   auto encoding = vector->encoding();
   auto typeKind = vector->typeKind();
+  if (VLOG_IS_ON(1) && nestLevel == 0) {
+    VLOG(1) << "PartitionedVector::create root. numRows=" << numRows
+            << " numPartitions=" << numPartitions
+            << " encoding=" << static_cast<int32_t>(encoding)
+            << " typeKind=" << static_cast<int32_t>(typeKind);
+  }
 
   switch (encoding) {
     case VectorEncoding::Simple::FLAT: {
@@ -463,6 +469,10 @@ PartitionedVectorPtr PartitionedVector::create(
       } else {
         partitionOffsets[0] = numRows;
       }
+      VELOX_CHECK_EQ(
+          partitionOffsets[numPartitions - 1],
+          numRows,
+          "ROW partition offsets final value must equal numRows");
 
       auto rowVectorPtr = vector->as<RowVector>();
       std::vector<PartitionedVectorPtr> children;
@@ -553,6 +563,10 @@ PartitionedVectorPtr PartitionedVector::create(
             topRowPartitions.size(),
             partitionOffsetsForNextLevel);
         prefixSum(partitionOffsetsForNextLevel, numPartitions);
+        VELOX_CHECK_EQ(
+            partitionOffsetsForNextLevel[numPartitions - 1],
+            lastTopRowOffset,
+            "ARRAY partition offsets final value must equal flattened row count");
 
         // swap topRowOffsetsForNextLevelBuffer and topRowOffsetsForCurrentLevel
         std::swap(
@@ -633,6 +647,12 @@ PartitionedVectorPtr PartitionedVector::createWrapped(
   auto numRows = vector->size();
   auto encoding = vector->encoding();
   auto typeKind = vector->typeKind();
+  if (VLOG_IS_ON(1) && nestLevel == 0) {
+    VLOG(1) << "PartitionedVector::createWrapped root. numRows=" << numRows
+            << " numPartitions=" << numPartitions
+            << " encoding=" << static_cast<int32_t>(encoding)
+            << " typeKind=" << static_cast<int32_t>(typeKind);
+  }
 
   switch (encoding) {
     case VectorEncoding::Simple::FLAT: {
