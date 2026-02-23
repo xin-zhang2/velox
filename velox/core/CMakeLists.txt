@@ -45,3 +45,14 @@ velox_link_libraries(
     fmt::fmt
   PRIVATE velox_encode
 )
+target_compile_options(velox_core
+        PUBLIC
+        -fsanitize=address
+        -fno-omit-frame-pointer
+        -g
+        -O0
+)
+target_link_options(velox_core
+        PUBLIC
+        -fsanitize=address
+        -fno-omit-frame-pointer -g -O0)

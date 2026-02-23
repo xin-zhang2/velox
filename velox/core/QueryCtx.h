@@ -548,10 +548,8 @@ class ExecCtx {
 
   // Returns true if the vector was moved into the pool.
   bool releaseDecodedVector(std::unique_ptr<DecodedVector>&& vector) {
-    if (optimizationParams_.exprEvalCacheEnabled) {
-      decodedVectorPool_.push_back(std::move(vector));
-      return true;
-    }
+    // Temporary debugging behavior: disable DecodedVector pooling while
+    // keeping other expression-evaluation caches enabled.
     return false;
   }
 
