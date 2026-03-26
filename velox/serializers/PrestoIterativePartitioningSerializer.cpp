@@ -24,6 +24,7 @@ namespace facebook::velox::serializer::presto {
 
 namespace {
 
+constexpr int8_t kCompressedBitMask = 1;
 constexpr int8_t kCheckSumBitMask = 4;
 constexpr int64_t kVectorSizeTypeSize{sizeof(vector_size_t)};
 // [numRows:4][codec:1]
@@ -350,7 +351,9 @@ PrestoIterativePartitioningSerializer::flushUncompressed() {
     rawOutputStreams[p] = outputStreams[p].get();
     beginStreamPositions[p] = outputStreams[p]->tellp();
 
-    flushStart(*outputStreams[p], p, codecMask);
+    flushStart(*outputStreams[p], rowsPerPartition_[p], codecMask);
+
+    writeInt32(rawOutputStreams[p], static_cast<int32_t>(numColumns_));
   }
 
   // 4. Flush column data.
@@ -362,10 +365,13 @@ PrestoIterativePartitioningSerializer::flushUncompressed() {
   std::map<uint32_t, std::pair<std::unique_ptr<folly::IOBuf>, vector_size_t>>
       result;
   for (uint32_t p : nonEmptyPartitions) {
+    const auto uncompressedSize = static_cast<int32_t>(
+        outputStreams[p]->tellp() - beginStreamPositions[p] - kHeaderSize);
     flushFinish(
         *outputStreams[p],
-        p,
+        rowsPerPartition_[p],
         beginStreamPositions[p],
+        uncompressedSize,
         codecMask,
         *listeners[p]);
     result[p] =
@@ -377,7 +383,108 @@ PrestoIterativePartitioningSerializer::flushUncompressed() {
 
 std::map<uint32_t, std::pair<std::unique_ptr<folly::IOBuf>, vector_size_t>>
 PrestoIterativePartitioningSerializer::flushCompressed() {
-  VELOX_NYI();
+  if (partitionedRowVectors_.empty()) {
+    return {};
+  }
+
+  std::vector<uint32_t> nonEmptyPartitions;
+  for (uint32_t p = 0; p < numPartitions_; ++p) {
+    if (rowsPerPartition_[p] > 0) {
+      nonEmptyPartitions.push_back(p);
+    }
+  }
+
+  const auto& rowSchema = type_->asRow();
+  flushSizes_.assign(rowSchema.size(), std::vector<int64_t>(numPartitions_, 0));
+  for (uint32_t col = 0; col < rowSchema.size(); ++col) {
+    std::vector<PartitionedVectorPtr> columnVectors;
+    columnVectors.reserve(partitionedRowVectors_.size());
+    for (const auto& pRowVector : partitionedRowVectors_) {
+      columnVectors.push_back(
+          std::dynamic_pointer_cast<PartitionedRowVector>(pRowVector)
+              ->childAt(col));
+    }
+    flushSizes_[col] = computeColumnFlushSizes(
+        columnVectors,
+        rowSchema.childAt(col),
+        nonEmptyPartitions,
+        rowsPerPartition_,
+        numPartitions_);
+  }
+
+  // Temporary uncompressed payload streams per partition, used as compression
+  // input before finalize the page.
+  std::vector<std::unique_ptr<IOBufOutputStream>> outStreams(numPartitions_);
+  std::vector<IOBufOutputStream*> rawOutStreams(numPartitions_);
+
+  for (uint32_t p : nonEmptyPartitions) {
+    int64_t initialSize = 4; // numCols
+    for (uint32_t col = 0; col < rowSchema.size(); ++col) {
+      initialSize += flushSizes_[col][p];
+    }
+    outStreams[p] =
+        std::make_unique<IOBufOutputStream>(*pool_, nullptr, initialSize);
+    rawOutStreams[p] = outStreams[p].get();
+    writeInt32(rawOutStreams[p], static_cast<int32_t>(numColumns_));
+  }
+
+  flushRowChildren(
+      partitionedRowVectors_, rowSchema, nonEmptyPartitions, rawOutStreams);
+
+  // Create final output streams sized to the exact bytes each partition needs.
+  std::vector<std::unique_ptr<PrestoOutputStreamListener>> listeners(
+      numPartitions_);
+  std::vector<std::unique_ptr<IOBufOutputStream>> outputStreams(numPartitions_);
+  std::vector<IOBufOutputStream*> rawOutputStreams(numPartitions_);
+  std::vector<std::streampos> beginStreamPositions(numPartitions_);
+
+  auto codec = common::compressionKindToCodec(opts_.compressionKind);
+  std::map<uint32_t, std::pair<std::unique_ptr<folly::IOBuf>, vector_size_t>>
+      result;
+
+  for (uint32_t p : nonEmptyPartitions) {
+    const auto uncompressedSize = static_cast<int32_t>(outStreams[p]->tellp());
+    VELOX_CHECK_LE(
+        uncompressedSize,
+        codec->maxUncompressedLength(),
+        "UncompressedSize exceeds limit");
+
+    auto iobuf = outStreams[p]->getIOBuf();
+    auto compressedBuffer = codec->compress(iobuf.get());
+    const auto compressedSize =
+        static_cast<int32_t>(compressedBuffer->computeChainDataLength());
+
+    const bool compressed =
+        compressedSize <= uncompressedSize * opts_.minCompressionRatio;
+    const auto serializedSize = compressed ? compressedSize : uncompressedSize;
+    const char codecMask =
+        compressed ? (kCompressedBitMask | kCheckSumBitMask) : getCodecMarker();
+    const auto& serializedBuffer = compressed ? compressedBuffer : iobuf;
+
+    listeners[p] = std::make_unique<PrestoOutputStreamListener>();
+    outputStreams[p] = std::make_unique<IOBufOutputStream>(
+        *pool_, listeners[p].get(), kHeaderSize + serializedSize);
+    const auto beginOffset = outputStreams[p]->tellp();
+
+    flushStart(*outputStreams[p], rowsPerPartition_[p], codecMask);
+
+    for (auto range : *serializedBuffer) {
+      outputStreams[p]->write(
+          reinterpret_cast<const char*>(range.data()), range.size());
+    }
+
+    flushFinish(
+        *outputStreams[p],
+        rowsPerPartition_[p],
+        beginOffset,
+        uncompressedSize,
+        codecMask,
+        *listeners[p]);
+    result[p] =
+        std::make_pair(outputStreams[p]->getIOBuf(), rowsPerPartition_[p]);
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +493,7 @@ PrestoIterativePartitioningSerializer::flushCompressed() {
 
 void PrestoIterativePartitioningSerializer::flushStart(
     IOBufOutputStream& out,
-    uint32_t partition,
+    int32_t numRows,
     char codecMask) const {
   auto* listener = dynamic_cast<PrestoOutputStreamListener*>(out.listener());
   if (listener) {
@@ -394,7 +501,6 @@ void PrestoIterativePartitioningSerializer::flushStart(
   }
 
   // Write 21-byte Presto page header; sizes and CRC are filled in later.
-  const int32_t numRows = static_cast<int32_t>(rowsPerPartition_[partition]);
   char header[kHeaderSize] = {};
   std::memcpy(&header[0], &numRows, 4);
   std::memcpy(&header[4], &codecMask, 1);
@@ -403,10 +509,6 @@ void PrestoIterativePartitioningSerializer::flushStart(
   if (listener) {
     listener->resume();
   }
-
-  // Number of columns is included in the CRC.
-  const int32_t numCols = static_cast<int32_t>(numColumns_);
-  out.write(reinterpret_cast<const char*>(&numCols), 4);
 }
 
 void PrestoIterativePartitioningSerializer::flushRowChildren(
@@ -431,26 +533,24 @@ void PrestoIterativePartitioningSerializer::flushRowChildren(
 
 void PrestoIterativePartitioningSerializer::flushFinish(
     IOBufOutputStream& out,
-    uint32_t partition,
+    int32_t numRows,
     std::streampos beginOffset,
+    int32_t uncompressedSize,
     char codecMask,
     PrestoOutputStreamListener& listener) const {
   listener.pause();
 
-  const std::streampos totalSize =
-      static_cast<int32_t>(out.tellp() - beginOffset);
-  const std::streampos uncompressedSize = totalSize - kHeaderSize;
+  const auto endOffset = out.tellp();
+  const auto serializedSize =
+      static_cast<int32_t>(out.tellp() - beginOffset - kHeaderSize);
   const int64_t crc = computeChecksum(
-      listener,
-      static_cast<int8_t>(codecMask),
-      static_cast<int32_t>(rowsPerPartition_[partition]),
-      uncompressedSize);
+      listener, static_cast<int8_t>(codecMask), numRows, uncompressedSize);
 
   out.seekp(beginOffset + kUncompressedSizeOffset);
   writeInt32(&out, uncompressedSize);
-  writeInt32(&out, uncompressedSize); // TODO: compressedSize
+  writeInt32(&out, serializedSize);
   writeInt64(&out, crc);
-  out.seekp(beginOffset + totalSize);
+  out.seekp(endOffset);
 }
 
 // ---------------------------------------------------------------------------

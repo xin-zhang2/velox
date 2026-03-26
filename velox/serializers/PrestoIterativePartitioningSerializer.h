@@ -79,13 +79,14 @@ class PrestoIterativePartitioningSerializer {
   std::map<uint32_t, std::pair<std::unique_ptr<folly::IOBuf>, vector_size_t>>
   flushCompressed();
 
-  void flushStart(IOBufOutputStream& out, uint32_t partition, char codecMask)
+  void flushStart(IOBufOutputStream& out, int32_t numRows, char codecMask)
       const;
 
   void flushFinish(
       IOBufOutputStream& out,
-      uint32_t partition,
+      int32_t numRows,
       std::streampos beginOffset,
+      int32_t uncompressedSize,
       char codecMask,
       PrestoOutputStreamListener& listener) const;
 

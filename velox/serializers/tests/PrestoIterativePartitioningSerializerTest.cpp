@@ -19,7 +19,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "velox/serializers/PrestoHeader.h"
 #include "velox/serializers/PrestoIterativePartitioningSerializer.h"
+#include "velox/serializers/PrestoSerializerDeserializationUtils.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
 
 using namespace facebook::velox;
@@ -37,11 +39,14 @@ class PrestoIterativePartitioningSerializerTest : public ::testing::Test,
   }
 
   /// Deserializes an IOBuf produced by PartitioningSerializer::flush().
-  RowVectorPtr deserialize(folly::IOBuf& iobuf, const RowTypePtr& type) {
+  RowVectorPtr deserialize(
+      folly::IOBuf& iobuf,
+      const RowTypePtr& type,
+      const SerdeOpts* opts = {}) {
     auto ranges = byteRangesFromIOBuf(&iobuf);
     BufferInputStream stream(std::move(ranges));
     RowVectorPtr result;
-    serde_.deserialize(&stream, pool_.get(), type, &result, nullptr);
+    serde_.deserialize(&stream, pool_.get(), type, &result, opts);
     return result;
   }
 
@@ -75,8 +80,8 @@ class PrestoIterativePartitioningSerializerTest : public ::testing::Test,
   /// Builds a PrestoIterativePartitioningSerializer with default serde options.
   std::unique_ptr<PrestoIterativePartitioningSerializer> makeSerializer(
       const RowTypePtr& type,
-      uint32_t numPartitions) {
-    SerdeOpts opts;
+      uint32_t numPartitions,
+      const SerdeOpts& opts = {}) {
     return std::make_unique<PrestoIterativePartitioningSerializer>(
         type, numPartitions, opts, pool_.get());
   }
@@ -494,6 +499,50 @@ TEST_F(PrestoIterativePartitioningSerializerTest, booleanMultipleColumns) {
   EXPECT_THAT(
       nullableValues<bool>(r1, 1),
       testing::ElementsAre(opt{true}, std::nullopt));
+}
+
+// Verify compressed page header bits and round-trip deserialization.
+TEST_F(PrestoIterativePartitioningSerializerTest, compressedRoundTrip) {
+  constexpr int32_t kNumRows = 5'000;
+
+  SerdeOpts opts;
+  opts.compressionKind = common::CompressionKind::CompressionKind_ZLIB;
+  opts.minCompressionRatio = 0.99;
+
+  std::vector<int64_t> values(kNumRows, 7);
+  std::vector<uint32_t> partitions(kNumRows);
+  for (int32_t i = 0; i < kNumRows; ++i) {
+    partitions[i] = i % 2;
+  }
+
+  auto type = ROW({"a", "b"}, {BIGINT(), BIGINT()});
+  auto input = makeRowVector(
+      {"a", "b"},
+      {makeFlatVector<int64_t>(values), makeFlatVector<int64_t>(values)});
+
+  auto serializer = makeSerializer(type, 2, opts);
+  serializer->append(input, partitions);
+  auto ioBufs = serializer->flush();
+
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  const std::vector<int64_t> expected(kNumRows / 2, 7);
+  for (uint32_t partition = 0; partition < 2; ++partition) {
+    auto ranges = byteRangesFromIOBuf(ioBufs.at(partition).first.get());
+    BufferInputStream stream(std::move(ranges));
+    auto maybeHeader = serializer::presto::detail::PrestoHeader::read(&stream);
+    ASSERT_TRUE(maybeHeader.hasValue());
+
+    const auto header = maybeHeader.value();
+    EXPECT_TRUE(
+        serializer::presto::detail::isCompressedBitSet(header.pageCodecMarker));
+    EXPECT_LT(header.compressedSize, header.uncompressedSize);
+
+    auto result = deserialize(*ioBufs.at(partition).first, type, &opts);
+    ASSERT_EQ(result->size(), kNumRows / 2);
+    EXPECT_EQ(sortedValues<int64_t>(result, 0), expected);
+    EXPECT_EQ(sortedValues<int64_t>(result, 1), expected);
+  }
 }
 
 // ── Lifecycle
