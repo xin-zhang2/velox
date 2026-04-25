@@ -57,6 +57,19 @@ RowTypePtr longDecimalTypeGenerator(int32_t numColumns) {
   return ROW(std::vector<TypePtr>(numColumns, DECIMAL(20, 3)));
 }
 
+/// Returns an N-level nested ROW with a BIGINT leaf. nestingLevel == 1 maps
+/// to ROW(BIGINT); each additional level wraps the previous type as the only
+/// field of a new ROW. The numColumns argument is the field count at the
+/// outermost row (each field has the same nested shape).
+template <int32_t nestingLevel>
+RowTypePtr nestedRowTypeGenerator(int32_t numColumns) {
+  TypePtr inner = BIGINT();
+  for (int i = 1; i < nestingLevel; ++i) {
+    inner = ROW({"r"}, {inner});
+  }
+  return ROW(std::vector<TypePtr>(numColumns, inner));
+}
+
 RowTypePtr mixedFlatTypeGenerator(int32_t numColumns) {
   const std::vector<TypePtr> typeSelection = {
       BOOLEAN(),
@@ -184,9 +197,35 @@ class VectorBuilder : public VectorTestBase {
             },
             isNullAt,
             type);
+      case TypeKind::ROW:
+        return makeRowColumn(type, size, isNullAt);
       default:
         VELOX_UNSUPPORTED("Unsupported benchmark type: {}", type->toString());
     }
+  }
+
+  // Recursively builds a nested RowVector matching `rowType`. Row-level nulls
+  // are placed only on the outermost row; child columns are null-free so the
+  // benchmark measures partitioning a row vector with a single null bitmap.
+  VectorPtr makeRowColumn(
+      const TypePtr& rowType,
+      vector_size_t size,
+      const std::function<bool(vector_size_t)>& isNullAt) {
+    const auto& asRow = rowType->asRow();
+    std::vector<VectorPtr> children;
+    children.reserve(asRow.size());
+    for (size_t i = 0; i < asRow.size(); ++i) {
+      children.push_back(makeColumn(asRow.childAt(i), size, /*isNullAt=*/{}));
+    }
+    auto result = VectorTestBase::makeRowVector(asRow.names(), children);
+    if (isNullAt) {
+      for (vector_size_t i = 0; i < size; ++i) {
+        if (isNullAt(i)) {
+          result->setNull(i, true);
+        }
+      }
+    }
+    return result;
   }
 };
 
@@ -260,6 +299,26 @@ BENCHMARK_TYPE(DATE, dateTypeGenerator);
 BENCHMARK_TYPE(ShortDecimal, shortDecimalTypeGenerator);
 BENCHMARK_TYPE(LongDecimal, longDecimalTypeGenerator);
 BENCHMARK_TYPE(Mixed, mixedFlatTypeGenerator);
+
+// Nested ROW benchmarks (1 column at the outer level, varying nesting depth)
+// are registered with a custom macro so the column-count axis stays at 1
+// while the partition-count and null-mode axes still vary. NestedRowN means
+// the row is N levels deep with a BIGINT leaf.
+#define BENCHMARK_NESTED(name, generator, nulls)   \
+  BENCHMARK_CONFIG(name, generator, 1, nulls, 4)   \
+  BENCHMARK_CONFIG(name, generator, 1, nulls, 16)  \
+  BENCHMARK_CONFIG(name, generator, 1, nulls, 64)  \
+  BENCHMARK_CONFIG(name, generator, 1, nulls, 256) \
+  BENCHMARK_CONFIG(name, generator, 1, nulls, 1024)
+
+#define BENCHMARK_NESTED_TYPE(name, generator) \
+  BENCHMARK_NESTED(name, generator, noNulls)   \
+  BENCHMARK_NESTED(name, generator, allNulls)  \
+  BENCHMARK_NESTED(name, generator, halfNulls)
+
+BENCHMARK_NESTED_TYPE(NestedRow1, nestedRowTypeGenerator<1>);
+BENCHMARK_NESTED_TYPE(NestedRow2, nestedRowTypeGenerator<2>);
+BENCHMARK_NESTED_TYPE(NestedRow3, nestedRowTypeGenerator<3>);
 
 } // namespace facebook::velox::test
 
