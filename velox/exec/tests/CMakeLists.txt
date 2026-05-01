@@ -152,6 +152,7 @@ set(
   AsyncConnectorTest.cpp
   VectorWindowPartitionTest.cpp
   OptimizedPartitionedOutputTest.cpp
+  OptimizedVectorHasherTest.cpp
 )
 
 set(
