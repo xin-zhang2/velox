@@ -152,7 +152,7 @@ function install_fbthrift {
     FBTHRIFT_EXTRA_CXXFLAGS=" -D_LIBCPP_HAS_NO_ASAN"
   fi
   EXTRA_PKG_CXXFLAGS="$FBTHRIFT_EXTRA_CXXFLAGS" \
-    cmake_install_dir fbthrift -Denable_tests=OFF -DBUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF
+    cmake_install_dir fbthrift -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" -Denable_tests=OFF -DBUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF
 }
 
 function install_duckdb {
