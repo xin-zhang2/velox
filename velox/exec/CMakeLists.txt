@@ -70,6 +70,7 @@ velox_add_library(
   OperatorTraceScan.cpp
   OperatorTraceWriter.cpp
   OperatorUtils.cpp
+  OptimizedHashPartitionFunction.cpp
   OptimizedPartitionedOutput.cpp
   OptimizedVectorHasher.cpp
   OrderBy.cpp
