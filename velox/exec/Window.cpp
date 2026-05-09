@@ -75,6 +75,7 @@ Window::Window(
       windowBuild_ = std::make_unique<window::SubPartitionedSortWindowBuild>(
           windowNode,
           numSubPartitions,
+          driverCtx->queryConfig(),
           pool(),
           makePrefixSortConfig(driverCtx->queryConfig()),
           spillConfig,

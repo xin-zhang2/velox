@@ -22,6 +22,7 @@ namespace facebook::velox::exec::window {
 SubPartitionedSortWindowBuild::SubPartitionedSortWindowBuild(
     const std::shared_ptr<const core::WindowNode>& node,
     int32_t numSubPartitions,
+    const core::QueryConfig& queryConfig,
     velox::memory::MemoryPool* pool,
     common::PrefixSortConfig&& prefixSortConfig,
     const common::SpillConfig* spillConfig,
@@ -40,8 +41,13 @@ SubPartitionedSortWindowBuild::SubPartitionedSortWindowBuild(
   for (int i = 0; i < numPartitionKeys_; i++) {
     keyChannels[i] = inputChannels_[i];
   }
-  subPartitioningFunction_ = std::make_unique<HashPartitionFunction>(
-      false, numSubPartitions_, node->inputType(), keyChannels);
+  subPartitioningFunction_ = createHashPartitionFunction(
+      /*localExchange=*/false,
+      numSubPartitions_,
+      node->inputType(),
+      keyChannels,
+      {},
+      queryConfig.optimizedHashPartitionFunctionEnabled());
   subWindowBuilds_.resize(numSubPartitions_);
   for (int i = 0; i < numSubPartitions_; i++) {
     subWindowBuilds_[i] = std::make_unique<SortWindowBuild>(
@@ -59,7 +65,12 @@ void SubPartitionedSortWindowBuild::addInput(RowVectorPtr input) {
   VELOX_CHECK_LT(currentSubPartition_, 0);
 
   subPartitionIdsBuffer_.resize(input->size());
-  subPartitioningFunction_->partition(*input, subPartitionIdsBuffer_);
+  std::optional<uint32_t> singlePartition =
+      subPartitioningFunction_->partition(*input, subPartitionIdsBuffer_);
+  if (singlePartition.has_value()) {
+    simd::simdFill<uint32_t>(
+        subPartitionIdsBuffer_.data(), singlePartition.value(), input->size());
+  }
 
   for (auto i = 0; i < inputChannels_.size(); ++i) {
     decodedInputVectors_[i].decode(*input->childAt(inputChannels_[i]));
