@@ -33,6 +33,7 @@ namespace facebook::velox::serializer::presto {
 using SerdeOpts = PrestoVectorSerde::PrestoOptions;
 
 class BufferState;
+class ColumnBufferState;
 
 /// Serializes a stream of RowVectors into per-partition Presto pages.
 ///
@@ -148,6 +149,7 @@ class PrestoIterativePartitioningSerializer {
       const std::vector<IOBufOutputStream*>& outputStreams) const;
 
   void flushColumn(
+      const ColumnBufferState& columnState,
       const std::vector<PartitionedVectorPtr>& partitionedVectors,
       const TypePtr& colType,
       const std::vector<uint32_t>& nonEmptyPartitions,
@@ -159,12 +161,31 @@ class PrestoIterativePartitioningSerializer {
       const std::vector<uint32_t>& nonEmptyPartitions,
       const std::vector<IOBufOutputStream*>& outputStreams) const;
 
+  void flushVariableWidthColumn(
+      const ColumnBufferState& columnState,
+      const std::vector<PartitionedVectorPtr>& partitionedVectors,
+      const TypePtr& colType,
+      const std::vector<uint32_t>& nonEmptyPartitions,
+      const std::vector<IOBufOutputStream*>& outputStreams) const;
+
   void flushSingleSimpleVector(
+      const PartitionedVectorPtr& partitionedVector,
+      const std::vector<IOBufOutputStream*>& outputStreams) const;
+
+  void flushSingleVariableWidthVector(
       const PartitionedVectorPtr& partitionedVector,
       const std::vector<IOBufOutputStream*>& outputStreams) const;
 
   template <TypeKind kind>
   void flushSingleFlatVector(
+      const PartitionedVectorPtr& partitionedVector,
+      const std::vector<IOBufOutputStream*>& outputStreams) const;
+
+  void flushSingleVariableWidthFlatVector(
+      const PartitionedVectorPtr& partitionedVector,
+      const std::vector<IOBufOutputStream*>& outputStreams) const;
+
+  void flushSingleVariableWidthConstantVector(
       const PartitionedVectorPtr& partitionedVector,
       const std::vector<IOBufOutputStream*>& outputStreams) const;
 
@@ -204,6 +225,11 @@ class PrestoIterativePartitioningSerializer {
       const T* partitionedValues,
       const uint64_t* rawNulls,
       const vector_size_t* partitionOffsets,
+      const std::vector<IOBufOutputStream*>& outputStreams) const;
+
+  void flushOffsets(
+      const ColumnBufferState& columnState,
+      const std::vector<uint32_t>& nonEmptyPartitions,
       const std::vector<IOBufOutputStream*>& outputStreams) const;
 
   void flushSequentialOffsets(
