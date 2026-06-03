@@ -327,4 +327,31 @@ class PartitionedConstantVector : public PartitionedVector {
   }
 };
 
+/// Partitions a DictionaryVector by reordering its top-level indices/nulls
+/// while reusing the wrapped value vector.
+class PartitionedDictionaryVector : public PartitionedVector {
+ public:
+  PartitionedDictionaryVector(
+      const VectorPtr& dictionaryVector,
+      uint32_t numPartitions,
+      const BufferPtr& partitionOffsets,
+      velox::memory::MemoryPool* pool)
+      : PartitionedVector(
+            dictionaryVector,
+            numPartitions,
+            partitionOffsets,
+            pool) {}
+
+  void partition(
+      const std::vector<uint32_t>& partitions,
+      PartitionBuildContext& ctx) override;
+
+  VectorPtr partitionAt(uint32_t partition) const override;
+
+  const vector_size_t* rawSizes() override {
+    VELOX_UNREACHABLE(
+        "PartitionedDictionaryVector does not implement rawSizes()");
+  }
+};
+
 } // namespace facebook::velox

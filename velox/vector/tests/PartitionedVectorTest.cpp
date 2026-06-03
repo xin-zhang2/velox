@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include "vector/tests/utils/VectorTestBase.h"
+#include "velox/vector/DictionaryVector.h"
 #include "velox/vector/PartitionedVector.h"
 #include "velox/vector/tests/utils/PartitionedVectorTestBase.h"
 
@@ -258,6 +259,68 @@ TEST_P(PartitioningVectorTest, testConstantVector) {
       numValues));
 }
 
+TEST_P(PartitioningVectorTest, testDictionaryVector) {
+  const int numValues = GetParam();
+
+  auto base = makeFlatVector<int32_t>(
+      numValues, [](auto row) { return row / 2; }, nullEvery(3));
+  auto indices = makeIndices(
+      numValues, [numValues](auto row) { return numValues - row - 1; });
+  auto topLevelNulls =
+      makeNulls(numValues, [](auto row) { return row % 4 == 0; });
+  auto dictionary = BaseVector::wrapInDictionary(
+      topLevelNulls, indices, numValues, std::move(base));
+
+  testVectorPartitioning(dictionary);
+}
+
+TEST_P(
+    PartitioningVectorTest,
+    dictionaryOverConstantPreservesDictionaryEncoding) {
+  const int numValues = GetParam();
+  auto constant = makeConstant<int32_t>(7, std::max(numValues, 1));
+  auto indices = makeIndices(
+      numValues, [numValues](auto row) { return numValues - row - 1; });
+  auto dictionary = std::make_shared<DictionaryVector<int32_t>>(
+      pool_.get(), nullptr, numValues, constant, indices);
+
+  std::vector<uint32_t> partitions(numValues);
+  for (int i = 0; i < numValues; ++i) {
+    partitions[i] = i % 3;
+  }
+
+  auto vectorCopy = BaseVector::copy(*dictionary, pool_.get());
+  testPartitionedVector(vectorCopy, partitions, 3);
+
+  auto partitionedVector =
+      PartitionedVector::create(dictionary, partitions, 3, ctx_, pool_.get());
+  EXPECT_EQ(
+      partitionedVector->baseVector()->encoding(), VectorEncoding::Simple::DICTIONARY);
+  for (uint32_t p = 0; p < 3; ++p) {
+    EXPECT_EQ(
+        partitionedVector->partitionAt(p)->encoding(),
+        VectorEncoding::Simple::DICTIONARY);
+  }
+}
+
+TEST_P(PartitioningVectorTest, testDictionaryRowVector) {
+  const int numValues = GetParam();
+
+  auto row = makeRowVector(
+      {makeFlatVector<int32_t>(
+           numValues, [](auto row) { return row; }, nullEvery(3)),
+       makeFlatVector<int64_t>(numValues, [](auto row) { return row * 10; })},
+      nullEvery(5));
+  auto indices = makeIndices(
+      numValues, [numValues](auto row) { return numValues - row - 1; });
+  auto topLevelNulls =
+      makeNulls(numValues, [](auto row) { return row % 4 == 0; });
+  auto dictionary =
+      BaseVector::wrapInDictionary(topLevelNulls, indices, numValues, row);
+
+  testVectorPartitioning(dictionary);
+}
+
 // Partitioning a null-free vector must not allocate a null buffer.
 TEST_P(PartitioningVectorTest, noNullBufferAllocatedForNullFreeFlat) {
   const int numValues = GetParam();
@@ -374,6 +437,31 @@ TEST_P(PartitioningVectorTest, numNullsAtFlatAllNulls) {
     const vector_size_t begin = p == 0 ? 0 : rawOffsets[p - 1];
     const vector_size_t numRowsInPartition = rawOffsets[p] - begin;
     EXPECT_EQ(pv->numNullsAt(p), numRowsInPartition) << "partition " << p;
+  }
+}
+
+TEST_P(PartitioningVectorTest, numNullsAtDictionary) {
+  const int numValues = GetParam();
+  auto base = makeFlatVector<int32_t>(
+      numValues, [](auto row) { return row; }, nullEvery(3));
+  auto indices = makeIndices(
+      numValues, [numValues](auto row) { return numValues - row - 1; });
+  auto topLevelNulls =
+      makeNulls(numValues, [](auto row) { return row % 4 == 0; });
+  auto dictionary = BaseVector::wrapInDictionary(
+      topLevelNulls, indices, numValues, std::move(base));
+
+  std::vector<uint32_t> partitions(numValues);
+  std::vector<vector_size_t> expected(3, 0);
+  for (int i = 0; i < numValues; ++i) {
+    partitions[i] = i % 3;
+    expected[partitions[i]] += dictionary->isNullAt(i);
+  }
+
+  auto pv =
+      PartitionedVector::create(dictionary, partitions, 3, ctx_, pool_.get());
+  for (uint32_t p = 0; p < 3; ++p) {
+    EXPECT_EQ(pv->numNullsAt(p), expected[p]) << "partition " << p;
   }
 }
 
