@@ -1261,6 +1261,76 @@ TEST_F(
 
 TEST_F(
     PrestoIterativePartitioningSerializerTest,
+    estimateBytesAfterAppendExactForSinglePartitionRow) {
+  auto nestedType = ROW({"n", "s"}, {BIGINT(), VARCHAR()});
+  auto type = ROW({"r"}, {nestedType});
+  auto serializer = makeSerializer(type, 1);
+
+  const std::string seedLong(StringView::kInlineSize + 4, 's');
+  serializer->append(
+      makeRowVector(
+          {"r"},
+          {makeRowVector(
+              {"n", "s"},
+              {makeFlatVector<int64_t>({1, 2}),
+               makeFlatVector<std::string>({"seed", seedLong})})}),
+      std::vector<uint32_t>(2, 0));
+
+  const std::string longValue(StringView::kInlineSize + 7, 'x');
+  auto input = makeRowVector(
+      {"r"},
+      {makeRowVector(
+          {"n", "s"},
+          {makeNullableFlatVector<int64_t>({3, std::nullopt, 5}),
+           makeNullableFlatVector<std::string>(
+               {"tail", std::nullopt, longValue})},
+          [](vector_size_t row) { return row == 1; })});
+
+  const auto estimatedAfter = serializer->estimateBytesAfterAppend(input);
+
+  serializer->append(input, std::vector<uint32_t>(3, 0));
+  EXPECT_EQ(estimatedAfter, serializer->bytesBuffered());
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    estimateBytesAfterAppendExactForSinglePartitionDictionaryRow) {
+  auto nestedType = ROW({"a", "s"}, {INTEGER(), VARCHAR()});
+  auto type = ROW({"r"}, {nestedType});
+  auto serializer = makeSerializer(type, 1);
+
+  const std::string seedLong(StringView::kInlineSize + 3, 'p');
+  serializer->append(
+      makeRowVector(
+          {"r"},
+          {makeRowVector(
+              {"a", "s"},
+              {makeFlatVector<int32_t>({10, 20}),
+               makeFlatVector<std::string>({"seed", seedLong})})}),
+      std::vector<uint32_t>(2, 0));
+
+  const std::string longValue =
+      std::string(StringView::kInlineSize + 9, 'd') + "-tail";
+  auto baseRow = makeRowVector(
+      {"a", "s"},
+      {makeNullableFlatVector<int32_t>({1, 2, std::nullopt, 4}),
+       makeNullableFlatVector<std::string>(
+           {"aa", std::nullopt, longValue, "tail"})});
+  auto dictionaryRow = BaseVector::wrapInDictionary(
+      makeNulls({false, true, false, false, false}),
+      makeIndices({3, 2, 1, 0, 2}),
+      5,
+      baseRow);
+  auto input = makeRowVector({"r"}, {dictionaryRow});
+
+  const auto estimatedAfter = serializer->estimateBytesAfterAppend(input);
+
+  serializer->append(input, std::vector<uint32_t>(5, 0));
+  EXPECT_EQ(estimatedAfter, serializer->bytesBuffered());
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
     estimateBytesAfterAppendOverestimatesPartitionedAppend) {
   auto type = ROW({"a", "b"}, {BIGINT(), INTEGER()});
   auto serializer = makeSerializer(type, 3);

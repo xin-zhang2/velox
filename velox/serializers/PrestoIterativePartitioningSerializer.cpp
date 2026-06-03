@@ -867,6 +867,83 @@ int64_t PrestoIterativePartitioningSerializer::estimateBytesAfterAppend(
     return nullBitmapBytes - nullBitmapBytesBuffered;
   };
 
+  const auto estimateColumnGrowth =
+      [&](const auto& self,
+          const ColumnBufferState* columnState,
+          const TypePtr& columnType,
+          const VectorPtr& inputVector) -> int64_t {
+    if (columnType->isUnknown()) {
+      VELOX_UNSUPPORTED(
+          "Unsupported type kind for "
+          "PrestoIterativePartitioningSerializer::estimateBytesAfterAppend: {}",
+          columnType->kind());
+    }
+
+    if (columnType->isFixedWidth()) {
+      const auto inputNulls = countNulls(*inputVector);
+      return numNewPartitions * simpleColumnBytes(columnType, 0, 0) +
+          estimateNullBitmapGrowth(columnState, inputNulls) +
+          static_cast<int64_t>(inputVector->size() - inputNulls.value_or(0)) *
+          fixedTypeWidth(columnType->kind());
+    }
+
+    switch (columnType->kind()) {
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY: {
+        const auto inputNulls = countNulls(*inputVector);
+        return numNewPartitions * variableWidthColumnBytes(0, 0, 0) +
+            estimateNullBitmapGrowth(columnState, inputNulls) +
+            static_cast<int64_t>(inputVector->size()) * sizeof(int32_t) +
+            variableWidthDataBytes(*inputVector);
+      }
+      case TypeKind::ROW: {
+        VectorPtr normalizedVector = inputVector;
+        if (normalizedVector->encoding() == VectorEncoding::Simple::DICTIONARY) {
+          normalizedVector =
+              RowVector::pushDictionaryToRowVectorLeaves(normalizedVector);
+        }
+
+        auto rowVector = normalizedVector->as<RowVector>();
+        VELOX_CHECK_NOT_NULL(
+            rowVector,
+            "Expected ROW input vector for output type {}, got encoding {}",
+            columnType->toString(),
+            normalizedVector->encoding());
+
+        const auto* rowState = dynamic_cast<const RowVectorState*>(columnState);
+        VELOX_DCHECK_NOT_NULL(rowState);
+
+        int64_t childGrowth = 0;
+        const auto& rowSchema = columnType->asRow();
+        for (column_index_t child = 0; child < rowSchema.size(); ++child) {
+          childGrowth += self(
+              self,
+              rowState->children()[child].get(),
+              rowSchema.childAt(child),
+              rowVector->childAt(child));
+        }
+
+        const auto inputNulls = countNulls(*normalizedVector);
+        return numNewPartitions *
+                rowColumnBytes(static_cast<int32_t>(rowSchema.size()), 0, 0, 0) +
+            estimateNullBitmapGrowth(columnState, inputNulls) +
+            static_cast<int64_t>(normalizedVector->size()) * sizeof(int32_t) +
+            childGrowth;
+      }
+      case TypeKind::ARRAY:
+      case TypeKind::MAP:
+        VELOX_NYI(
+            "Unsupported type kind for "
+            "PrestoIterativePartitioningSerializer::estimateBytesAfterAppend: {}",
+            columnType->kind());
+      default:
+        VELOX_UNSUPPORTED(
+            "Unsupported type kind for "
+            "PrestoIterativePartitioningSerializer::estimateBytesAfterAppend: {}",
+            columnType->kind());
+    }
+  };
+
   // Cache per input column. If multiple output columns map to the same input
   // column, reuse the already computed incremental bytes.
   std::vector<std::optional<int64_t>> estimatedIncrementalBytes(
@@ -880,48 +957,12 @@ int64_t PrestoIterativePartitioningSerializer::estimateBytesAfterAppend(
 
     const auto& columnType = outputType_->childAt(column);
     const auto* columnState = bufferState_->children()[column].get();
-    const auto inputNulls = countNulls(*input->childAt(inputColumn));
-
-    if (columnType->isUnknown()) {
-      VELOX_UNSUPPORTED(
-          "Unsupported type kind for "
-          "PrestoIterativePartitioningSerializer::estimateBytesAfterAppend: {}",
-          columnType->kind());
-    } else if (columnType->isFixedWidth()) {
-      estimatedIncrementalBytes[inputColumn] = numNewPartitions *
-              simpleColumnBytes(columnType, 0, 0) + // header growth
-          estimateNullBitmapGrowth(columnState,
-                                   inputNulls) + // null bitmap growth
-          static_cast<int64_t>(numRows - inputNulls.value_or(0)) *
-              fixedTypeWidth(columnType->kind()); // value bytes growth
-      estimatedBytes += *estimatedIncrementalBytes[inputColumn];
-    } else {
-      switch (columnType->kind()) {
-        case TypeKind::VARCHAR:
-        case TypeKind::VARBINARY: {
-          estimatedIncrementalBytes[inputColumn] = numNewPartitions *
-                  variableWidthColumnBytes(0, 0, 0) + // header growth
-              estimateNullBitmapGrowth(columnState,
-                                       inputNulls) + // null bitmap growth
-              static_cast<int64_t>(numRows) * sizeof(int32_t) + // offsets
-              variableWidthDataBytes(*input->childAt(inputColumn)); // values
-          estimatedBytes += *estimatedIncrementalBytes[inputColumn];
-          break;
-        }
-        case TypeKind::ROW:
-        case TypeKind::ARRAY:
-        case TypeKind::MAP:
-          VELOX_NYI(
-              "Unsupported type kind for "
-              "PrestoIterativePartitioningSerializer::estimateBytesAfterAppend: {}",
-              columnType->kind());
-        default:
-          VELOX_UNSUPPORTED(
-              "Unsupported type kind for "
-              "PrestoIterativePartitioningSerializer::estimateBytesAfterAppend: {}",
-              columnType->kind());
-      }
-    }
+    estimatedIncrementalBytes[inputColumn] = estimateColumnGrowth(
+        estimateColumnGrowth,
+        columnState,
+        columnType,
+        input->childAt(inputColumn));
+    estimatedBytes += *estimatedIncrementalBytes[inputColumn];
   }
   return estimatedBytes;
 }
