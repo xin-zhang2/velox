@@ -185,8 +185,19 @@ int64_t variableWidthDataBytes(const BaseVector& vector) {
       return static_cast<int64_t>(vector.size()) *
           constantVector->valueAt(0).size();
     }
+    case VectorEncoding::Simple::DICTIONARY: {
+      const auto* simpleVector = vector.as<SimpleVector<StringView>>();
+      VELOX_DCHECK_NOT_NULL(simpleVector);
+
+      int64_t dataBytes = 0;
+      for (vector_size_t i = 0; i < vector.size(); ++i) {
+        if (!simpleVector->isNullAt(i)) {
+          dataBytes += simpleVector->valueAt(i).size();
+        }
+      }
+      return dataBytes;
+    }
     case VectorEncoding::Simple::BIASED:
-    case VectorEncoding::Simple::DICTIONARY:
     case VectorEncoding::Simple::SEQUENCE:
       VELOX_NYI(
           "Unsupported vector encoding for variable-width size estimation: {}",
@@ -255,6 +266,30 @@ void accumulateVariableWidthOffsetsForConstantVector(
   }
 }
 
+void accumulateVariableWidthOffsetsForDictionaryVector(
+    const PartitionedVectorPtr& partitionedVector,
+    std::vector<std::vector<int32_t>>& offsetsPerPartition) {
+  const auto* simpleVector =
+      partitionedVector->baseVector()->as<SimpleVector<StringView>>();
+  VELOX_DCHECK_NOT_NULL(simpleVector);
+
+  const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
+
+  vector_size_t lastPartitionOffset = 0;
+  for (uint32_t p = 0; p < offsetsPerPartition.size(); ++p) {
+    const auto partitionOffset = partitionOffsets[p];
+    auto& offsets = offsetsPerPartition[p];
+    int32_t endOffset = offsets.empty() ? 0 : offsets.back();
+    for (auto i = lastPartitionOffset; i < partitionOffset; ++i) {
+      if (!simpleVector->isNullAt(i)) {
+        endOffset += simpleVector->valueAt(i).size();
+      }
+      offsets.push_back(endOffset);
+    }
+    lastPartitionOffset = partitionOffset;
+  }
+}
+
 /// Accumulates per-partition end offsets for partitionedVector.
 void accumulateVariableWidthOffsets(
     const PartitionedVectorPtr& partitionedVector,
@@ -268,8 +303,11 @@ void accumulateVariableWidthOffsets(
       accumulateVariableWidthOffsetsForConstantVector(
           partitionedVector, offsetsPerPartition);
       break;
-    case VectorEncoding::Simple::BIASED:
     case VectorEncoding::Simple::DICTIONARY:
+      accumulateVariableWidthOffsetsForDictionaryVector(
+          partitionedVector, offsetsPerPartition);
+      break;
+    case VectorEncoding::Simple::BIASED:
     case VectorEncoding::Simple::SEQUENCE:
       VELOX_NYI(
           "Unsupported vector encoding for variable-width offset accumulation: {}",
@@ -1738,6 +1776,31 @@ void PrestoIterativePartitioningSerializer::
   }
 }
 
+void flushSingleVariableWidthDictionaryVector(
+    const PartitionedVectorPtr& partitionedVector,
+    const std::vector<IOBufOutputStream*>& outputStreams,
+    uint32_t numPartitions) {
+  const auto* simpleVector =
+      partitionedVector->baseVector()->as<SimpleVector<StringView>>();
+  VELOX_DCHECK_NOT_NULL(simpleVector);
+
+  const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
+
+  vector_size_t lastOffset = 0;
+  for (uint32_t p = 0; p < numPartitions; ++p) {
+    const auto offset = partitionOffsets[p];
+    if (outputStreams[p] != nullptr && offset > lastOffset) {
+      for (vector_size_t i = lastOffset; i < offset; ++i) {
+        if (!simpleVector->isNullAt(i)) {
+          const auto value = simpleVector->valueAt(i);
+          outputStreams[p]->write(value.data(), value.size());
+        }
+      }
+    }
+    lastOffset = offset;
+  }
+}
+
 void PrestoIterativePartitioningSerializer::flushSingleVariableWidthVector(
     const PartitionedVectorPtr& partitionedVector,
     const std::vector<IOBufOutputStream*>& outputStreams) const {
@@ -1750,8 +1813,11 @@ void PrestoIterativePartitioningSerializer::flushSingleVariableWidthVector(
     case VectorEncoding::Simple::CONSTANT:
       flushSingleVariableWidthConstantVector(partitionedVector, outputStreams);
       break;
-    case VectorEncoding::Simple::BIASED:
     case VectorEncoding::Simple::DICTIONARY:
+      flushSingleVariableWidthDictionaryVector(
+          partitionedVector, outputStreams, numPartitions_);
+      break;
+    case VectorEncoding::Simple::BIASED:
     case VectorEncoding::Simple::SEQUENCE:
       VELOX_NYI(
           "Unsupported vector encoding for PrestoIterativePartitioningSerializer: {}",
