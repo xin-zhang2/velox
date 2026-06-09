@@ -76,8 +76,16 @@ struct PartitionBuildContext {
   /// Scratch buffer reused across columns for the scatter output. Avoids
   /// repeated allocation during multi-column partitioning.
   BufferPtr tempBuffer = nullptr;
+  /// Cache of partitioned dictionary indices within a single create() call.
+  /// Entries retain the input buffer so pointer keys cannot be recycled while
+  /// the cache is populated.
+  std::unordered_map<BufferPtr, BufferPtr> partitionedDictionaryIndices;
 
   PartitionBuildContext() = default;
+
+  void clearPartitionedDictionaryIndexCache() {
+    partitionedDictionaryIndices.clear();
+  }
 };
 
 /// PartitionedVector provides an in-place, partition-aware layout of a vector
@@ -353,6 +361,34 @@ class PartitionedConstantVector : public PartitionedVector {
   const vector_size_t* rawSizes() override {
     VELOX_UNREACHABLE(
         "PartitionedConstantVector does not implement rawSizes()");
+  }
+};
+
+/// Partitions a DictionaryVector by reordering only the top-level dictionary
+/// indices and nulls while reusing the wrapped value vector.
+class PartitionedDictionaryVector : public PartitionedVector {
+ public:
+  PartitionedDictionaryVector(
+      const VectorPtr& dictionaryVector,
+      uint32_t numPartitions,
+      const BufferPtr& partitionOffsets,
+      velox::memory::MemoryPool* pool)
+      : PartitionedVector(
+            dictionaryVector,
+            numPartitions,
+            partitionOffsets,
+            pool) {}
+
+  void partition(
+      const std::vector<uint32_t>& partitions,
+      std::optional<uint32_t> singlePartition,
+      PartitionBuildContext& ctx) override;
+
+  VectorPtr partitionAt(uint32_t partition) const override;
+
+  const vector_size_t* rawSizes() override {
+    VELOX_UNREACHABLE(
+        "PartitionedDictionaryVector does not implement rawSizes()");
   }
 };
 

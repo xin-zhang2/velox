@@ -146,6 +146,11 @@ class DictionaryVector : public SimpleVector<T> {
     indices_ = std::move(indices);
   }
 
+  void setIndices(BufferPtr indices) {
+    setWrapInfo(indices);
+    rawIndices_ = indices_ == nullptr ? nullptr : indices_->as<vector_size_t>();
+  }
+
   BufferPtr mutableIndices(vector_size_t size) {
     BaseVector::resizeIndices(
         BaseVector::length_, size, BaseVector::pool_, indices_, &rawIndices_);

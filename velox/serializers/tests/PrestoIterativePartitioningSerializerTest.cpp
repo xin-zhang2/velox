@@ -70,6 +70,19 @@ class PrestoIterativePartitioningSerializerTestBase : public VectorTestBase {
     return result;
   }
 
+  VectorPtr canonicalize(VectorPtr vector) {
+    auto indices = makeIndices(vector->size(), [](auto row) { return row; });
+    auto* rawIndices = indices->asMutable<vector_size_t>();
+    std::stable_sort(
+        rawIndices,
+        rawIndices + vector->size(),
+        [&](vector_size_t left, vector_size_t right) {
+          return vector->compare(vector.get(), left, right) < 0;
+        });
+    return BaseVector::wrapInDictionary(
+        nullptr, indices, vector->size(), vector);
+  }
+
   /// Extracts flat values from a column into a sorted vector.
   template <typename T>
   std::vector<T> sortedValues(const RowVectorPtr& row, int column) {
@@ -973,6 +986,103 @@ TEST_F(PrestoIterativePartitioningSerializerTest, multipleAppends) {
 
 TEST_F(
     PrestoIterativePartitioningSerializerTest,
+    dictionaryScalarInputRoundTrip) {
+  auto type = ROW({"v"}, {BIGINT()});
+
+  auto base = makeNullableFlatVector<int64_t>(
+      {10, std::nullopt, 30, 40, 50, std::nullopt});
+  auto dictionary = BaseVector::wrapInDictionary(
+      makeNulls({false, true, false, false, false, false}),
+      makeIndices({5, 4, 3, 2, 1, 0}),
+      6,
+      base);
+  auto input = makeRowVector({"v"}, {dictionary});
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(input, {0, 1, 0, 1, 0, 1});
+
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto p0 = deserialize(*ioBufs.at(0).first, type);
+  auto p1 = deserialize(*ioBufs.at(1).first, type);
+
+  auto expectedP0 = makeRowVector(
+      {"v"},
+      {makeNullableFlatVector<int64_t>({std::nullopt, 40, std::nullopt})});
+  auto expectedP1 = makeRowVector(
+      {"v"}, {makeNullableFlatVector<int64_t>({std::nullopt, 30, 10})});
+
+  assertEqualVectors(canonicalize(expectedP0), canonicalize(p0));
+  assertEqualVectors(canonicalize(expectedP1), canonicalize(p1));
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    dictionaryScalarSinglePartitionFastPathRoundTrip) {
+  auto type = ROW({"v"}, {BIGINT()});
+
+  auto base = makeNullableFlatVector<int64_t>({10, std::nullopt, 30});
+  auto dictionary =
+      BaseVector::wrapInDictionary(nullptr, makeIndices({2, 1, 0}), 3, base);
+  auto input = makeRowVector({"v"}, {dictionary});
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(input, /*singlePartition=*/1);
+
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 1);
+  ASSERT_TRUE(ioBufs.count(1));
+
+  auto actual = deserialize(*ioBufs.at(1).first, type);
+  auto expected = makeRowVector(
+      {"v"}, {makeNullableFlatVector<int64_t>({30, std::nullopt, 10})});
+  assertEqualVectors(expected, actual);
+}
+
+TEST_F(PrestoIterativePartitioningSerializerTest, dictionaryRowInputRoundTrip) {
+  auto nestedType = ROW({"a", "b"}, {INTEGER(), BIGINT()});
+  auto type = ROW({"r"}, {nestedType});
+
+  auto baseRow = makeRowVector(
+      {"a", "b"},
+      {makeNullableFlatVector<int32_t>({1, 2, 3, std::nullopt}),
+       makeFlatVector<int64_t>({10, 20, 30, 40})});
+  auto dictionaryRow = BaseVector::wrapInDictionary(
+      makeNulls({false, true, false, false, false}),
+      makeIndices({3, 2, 1, 0, 2}),
+      5,
+      baseRow);
+  auto input = makeRowVector({"r"}, {dictionaryRow});
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(input, {0, 1, 0, 1, 0});
+
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto p0 = deserialize(*ioBufs.at(0).first, type);
+  auto p1 = deserialize(*ioBufs.at(1).first, type);
+
+  auto expectedP0 = makeRowVector(
+      {"r"},
+      {makeRowVector(
+          {"a", "b"},
+          {makeNullableFlatVector<int32_t>({std::nullopt, 2, 3}),
+           makeFlatVector<int64_t>({40, 20, 30})})});
+  auto expectedP1 = makeRowVector(
+      {"r"},
+      {makeRowVector(
+          {"a", "b"},
+          {makeFlatVector<int32_t>({0, 1}), makeFlatVector<int64_t>({0, 10})},
+          [](vector_size_t row) { return row == 0; })});
+
+  assertEqualVectors(canonicalize(expectedP0), canonicalize(p0));
+  assertEqualVectors(canonicalize(expectedP1), canonicalize(p1));
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
     bytesBufferedPartitionGrowth) {
   auto type = ROW({"v"}, {BIGINT()});
   auto serializer = makeSerializer(type, 2);
@@ -1159,6 +1269,97 @@ TEST_F(
   const auto estimatedAfter = serializer->estimateBytesAfterAppend(input);
 
   serializer->append(input, std::vector<uint32_t>(3, 0));
+  EXPECT_EQ(estimatedAfter, serializer->bytesBuffered());
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    estimateBytesAfterAppendExactForDictionary) {
+  auto type = ROW({"v"}, {BIGINT()});
+  auto serializer = makeSerializer(type, 3);
+
+  serializer->append(
+      makeRowVector({"v"}, {makeFlatVector<int64_t>({1, 2, 3, 4})}),
+      std::vector<uint32_t>(4, 0));
+
+  auto base = makeNullableFlatVector<int64_t>({10, std::nullopt, 30});
+  auto dictionary = BaseVector::wrapInDictionary(
+      makeNulls({false, false, true}), makeIndices({2, 1, 0}), 3, base);
+  auto input = makeRowVector({"v"}, {dictionary});
+
+  auto estimatedAfter = serializer->estimateBytesAfterAppend(input);
+
+  // input lands on new partitions
+  serializer->append(input, {1, 1, 2});
+  EXPECT_EQ(estimatedAfter, serializer->bytesBuffered());
+
+  estimatedAfter = serializer->estimateBytesAfterAppend(input);
+
+  // input lands on existing partitions
+  serializer->append(input, {0, 2, 0});
+  EXPECT_EQ(estimatedAfter, serializer->bytesBuffered());
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    estimateBytesAfterAppendExactForDictionaryRow) {
+  auto nestedType = ROW({"a"}, {INTEGER()});
+  auto type = ROW({"r"}, {nestedType});
+  auto serializer = makeSerializer(type, 3);
+
+  serializer->append(
+      makeRowVector(
+          {"r"},
+          {makeRowVector(
+              {"a"},
+              {makeNullableFlatVector<int32_t>({1, std::nullopt, 3, 4})})}),
+      std::vector<uint32_t>(4, 0));
+
+  auto baseRow = makeRowVector(
+      {"a"}, {makeNullableFlatVector<int32_t>({10, std::nullopt, 30})});
+  auto dictionaryRow =
+      BaseVector::wrapInDictionary(nullptr, makeIndices({2, 1, 0}), 3, baseRow);
+  auto input = makeRowVector({"r"}, {dictionaryRow});
+
+  auto estimatedAfter = serializer->estimateBytesAfterAppend(input);
+
+  // input lands on new partitions
+  serializer->append(input, {1, 1, 2});
+  EXPECT_EQ(estimatedAfter, serializer->bytesBuffered());
+
+  estimatedAfter = serializer->estimateBytesAfterAppend(input);
+
+  // input lands on existing partitions
+  serializer->append(input, {0, 2, 0});
+  EXPECT_EQ(estimatedAfter, serializer->bytesBuffered());
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    estimateBytesAfterAppendExactForSinglePartitionDictionaryVarchar) {
+  auto type = ROW({"v"}, {VARCHAR()});
+  auto serializer = makeSerializer(type, 1);
+
+  const std::string seedLong(StringView::kInlineSize + 3, 's');
+  serializer->append(
+      makeRowVector({"v"}, {makeFlatVector<std::string>({"seed", seedLong})}),
+      std::vector<uint32_t>(2, 0));
+
+  const std::string long1(StringView::kInlineSize + 5, 'x');
+  const std::string long2 =
+      std::string(StringView::kInlineSize + 8, 'y') + "-tail";
+  auto base = makeNullableFlatVector<std::string>(
+      {long1, std::nullopt, "", "tail", long2});
+  auto dictionary = BaseVector::wrapInDictionary(
+      makeNulls({false, true, false, false, false, false}),
+      makeIndices({4, 2, 1, 0, 3, 2}),
+      6,
+      base);
+  auto input = makeRowVector({"v"}, {dictionary});
+
+  const auto estimatedAfter = serializer->estimateBytesAfterAppend(input);
+
+  serializer->append(input, std::vector<uint32_t>(6, 0));
   EXPECT_EQ(estimatedAfter, serializer->bytesBuffered());
 }
 
@@ -1400,6 +1601,41 @@ TEST_F(PrestoIterativePartitioningSerializerTest, varcharWithoutNulls) {
           StringView(long2), StringView("short"), StringView("tail")}));
 }
 
+TEST_F(PrestoIterativePartitioningSerializerTest, dictionaryVarcharRoundTrip) {
+  auto type = ROW({"s"}, {VARCHAR()});
+
+  const std::string long1(StringView::kInlineSize + 5, 'a');
+  const std::string long2 =
+      std::string(StringView::kInlineSize + 9, 'b') + "-suffix";
+  auto base = makeNullableFlatVector<std::string>(
+      {long1, std::nullopt, "", "tail", long2});
+  auto dictionary = BaseVector::wrapInDictionary(
+      makeNulls({false, true, false, false, false, false}),
+      makeIndices({4, 2, 1, 0, 3, 2}),
+      6,
+      base);
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(makeRowVector({"s"}, {dictionary}), {0, 1, 0, 1, 0, 1});
+  auto ioBufs = serializer->flush();
+
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto r0 = deserialize(*ioBufs.at(0).first, type);
+  ASSERT_EQ(r0->size(), 3);
+  EXPECT_EQ(
+      sortedNullableValues<StringView>(r0, 0),
+      (std::vector<std::optional<StringView>>{
+          std::nullopt, StringView(long2), "tail"}));
+
+  auto r1 = deserialize(*ioBufs.at(1).first, type);
+  ASSERT_EQ(r1->size(), 3);
+  EXPECT_EQ(
+      sortedNullableValues<StringView>(r1, 0),
+      (std::vector<std::optional<StringView>>{
+          std::nullopt, "", StringView(long1)}));
+}
+
 TEST_F(
     PrestoIterativePartitioningSerializerTest,
     varcharWithNullsMultipleAppend) {
@@ -1479,6 +1715,44 @@ TEST_F(PrestoIterativePartitioningSerializerTest, varbinaryWithNulls) {
       sortedNullableValues<StringView>(r1, 0),
       (std::vector<std::optional<StringView>>{
           std::nullopt, StringView(binary1), StringView(binary3)}));
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    dictionaryVarbinaryRoundTrip) {
+  auto type = ROW({"b"}, {VARBINARY()});
+
+  const std::string binary0("\x00\x01\x02", 3);
+  const std::string binary1("ab\0cd", 5);
+  const std::string binary2(StringView::kInlineSize + 6, '\x7f');
+
+  auto base = makeNullableFlatVector<std::string>(
+      {binary0, std::nullopt, binary1, std::string(), binary2}, VARBINARY());
+  auto dictionary = BaseVector::wrapInDictionary(
+      makeNulls({false, true, false, false, false, false}),
+      makeIndices({4, 2, 1, 0, 3, 2}),
+      6,
+      base);
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(makeRowVector({"b"}, {dictionary}), {0, 1, 0, 1, 0, 1});
+  auto ioBufs = serializer->flush();
+
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto r0 = deserialize(*ioBufs.at(0).first, type);
+  ASSERT_EQ(r0->size(), 3);
+  EXPECT_EQ(
+      sortedNullableValues<StringView>(r0, 0),
+      (std::vector<std::optional<StringView>>{
+          std::nullopt, "", StringView(binary2)}));
+
+  auto r1 = deserialize(*ioBufs.at(1).first, type);
+  ASSERT_EQ(r1->size(), 3);
+  EXPECT_EQ(
+      sortedNullableValues<StringView>(r1, 0),
+      (std::vector<std::optional<StringView>>{
+          std::nullopt, StringView(binary0), StringView(binary1)}));
 }
 
 TEST_F(
