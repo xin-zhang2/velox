@@ -15,7 +15,9 @@
  */
 #include "velox/vector/PartitionedVector.h"
 
+#include "velox/vector/DictionaryVector.h"
 #include "velox/vector/FlatVector.h"
+#include "velox/vector/VectorTypeUtils.h"
 
 namespace facebook::velox {
 
@@ -225,6 +227,27 @@ void partitionFixedWidthValues<bool>(
       rawCursorOffsets);
 }
 
+template <TypeKind kind>
+void partitionDictionaryIndices(
+    const VectorPtr& vector,
+    const std::vector<uint32_t>& partitions,
+    const BufferPtr& endPartitionOffsets,
+    uint32_t numPartitions,
+    PartitionBuildContext& ctx,
+    velox::memory::MemoryPool* pool) {
+  using T = typename KindToFlatVector<kind>::WrapperType;
+  auto* dictionaryVector = vector->as<DictionaryVector<T>>();
+  VELOX_DCHECK_NOT_NULL(dictionaryVector);
+
+  // Ensure indices is mutable
+  dictionaryVector->mutableIndices(vector->size());
+  auto& indices = dictionaryVector->indices();
+  partitionFixedWidthValues<vector_size_t>(
+      indices, partitions, endPartitionOffsets, numPartitions, ctx, pool);
+  // Ensure rawIndices is correct after in-place partitioning
+  dictionaryVector->mutableIndices(vector->size());
+}
+
 template <TypeKind typeKind>
 PartitionedVectorPtr createPartitionedFlatVector(
     VectorPtr vector,
@@ -267,6 +290,23 @@ PartitionedVectorPtr createPartitionedRowVector(
   partitionedRowVector->partition(partitions, singlePartition, ctx);
 
   return partitionedRowVector;
+}
+
+PartitionedVectorPtr createPartitionedDictionaryVector(
+    VectorPtr vector,
+    const std::vector<uint32_t>& partitions,
+    std::optional<uint32_t> singlePartition,
+    uint32_t numPartitions,
+    const BufferPtr& endPartitionOffsets,
+    PartitionBuildContext& ctx,
+    velox::memory::MemoryPool* pool) {
+  VELOX_DCHECK_EQ(vector->encoding(), VectorEncoding::Simple::DICTIONARY);
+
+  auto partitionedDictionaryVector =
+      std::make_shared<PartitionedDictionaryVector>(
+          vector, numPartitions, endPartitionOffsets, pool);
+  partitionedDictionaryVector->partition(partitions, singlePartition, ctx);
+  return partitionedDictionaryVector;
 }
 
 } // namespace
@@ -385,9 +425,35 @@ PartitionedVectorPtr PartitionedVector::create(
       return partitionedConstantVector;
     }
 
+    case VectorEncoding::Simple::DICTIONARY: {
+      // Push dictionary encoding to the leaf vectors for RowVectors,
+      // or combine adjacent DICT layers for non RowVectors.
+      const auto rewrittenVector =
+          RowVector::pushDictionaryToRowVectorLeaves(vector);
+
+      if (rewrittenVector->encoding() == VectorEncoding::Simple::DICTIONARY) {
+        return createPartitionedDictionaryVector(
+            rewrittenVector,
+            partitions,
+            singlePartition,
+            numPartitions,
+            endPartitionOffsets,
+            ctx,
+            pool);
+      }
+
+      return create(
+          rewrittenVector,
+          partitions,
+          singlePartition,
+          numPartitions,
+          endPartitionOffsets,
+          ctx,
+          pool);
+    }
+
     case VectorEncoding::Simple::ARRAY:
     case VectorEncoding::Simple::MAP:
-    case VectorEncoding::Simple::DICTIONARY:
     case VectorEncoding::Simple::BIASED:
     case VectorEncoding::Simple::SEQUENCE:
     case VectorEncoding::Simple::LAZY:
@@ -611,6 +677,74 @@ VectorPtr PartitionedConstantVector::partitionAt(uint32_t partition) const {
       rawEndPartitionOffsets_[partition] - beginOffset;
 
   return vector_->slice(0, numRowsInPartition);
+}
+
+void PartitionedDictionaryVector::partition(
+    const std::vector<uint32_t>& partitions,
+    std::optional<uint32_t> singlePartition,
+    PartitionBuildContext& ctx) {
+  if (singlePartition.has_value()) {
+    if (const auto* rawNulls = vector_->rawNulls()) {
+      numNullsPerPartition_[singlePartition.value()] =
+          static_cast<vector_size_t>(
+              bits::countNulls(rawNulls, 0, vector_->size()));
+    }
+    return;
+  }
+
+  if (numPartitions_ > 1) {
+    VELOX_DYNAMIC_TYPE_DISPATCH_ALL(
+        partitionDictionaryIndices,
+        vector_->typeKind(),
+        vector_,
+        partitions,
+        endPartitionOffsets_,
+        numPartitions_,
+        ctx,
+        pool_);
+
+    if (vector_->rawNulls()) {
+      const auto numRows = static_cast<vector_size_t>(partitions.size());
+      const auto numBytes = bits::nbytes(numRows);
+      initializeCursorPartitionOffsets(
+          ctx.cursorPartitionOffsets,
+          endPartitionOffsets_,
+          numPartitions_,
+          pool_);
+      ensureCapacity<uint8_t>(ctx.tempBuffer, numBytes, pool_);
+      scatterBitsInPlace(
+          reinterpret_cast<uint8_t*>(vector_->mutableRawNulls()),
+          ctx.tempBuffer->asMutable<uint8_t>(),
+          numRows,
+          partitions,
+          ctx.cursorPartitionOffsets->asMutable<vector_size_t>());
+    }
+  }
+
+  if (!vector_->mayHaveNulls()) {
+    return;
+  }
+
+  for (uint32_t p = 0; p < numPartitions_; ++p) {
+    const vector_size_t begin = p == 0 ? 0 : rawEndPartitionOffsets_[p - 1];
+    const vector_size_t end = rawEndPartitionOffsets_[p];
+    if (begin < end) {
+      for (vector_size_t row = begin; row < end; ++row) {
+        numNullsPerPartition_[p] += vector_->isNullAt(row);
+      }
+    }
+  }
+}
+
+VectorPtr PartitionedDictionaryVector::partitionAt(uint32_t partition) const {
+  VELOX_CHECK_LT(partition, numPartitions_);
+
+  const vector_size_t beginOffset =
+      partition == 0 ? 0 : rawEndPartitionOffsets_[partition - 1];
+  const vector_size_t numRowsInPartition =
+      rawEndPartitionOffsets_[partition] - beginOffset;
+
+  return vector_->slice(beginOffset, numRowsInPartition);
 }
 
 } // namespace facebook::velox

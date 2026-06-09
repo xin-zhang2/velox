@@ -303,6 +303,57 @@ TEST_P(PartitioningVectorTest, singlePartitionWithoutAssignments) {
       BaseVector::countNulls(nullableFlat->nulls(), 0, numValues));
 }
 
+TEST_P(PartitioningVectorTest, testDictionaryVector) {
+  const int numValues = GetParam();
+
+  auto base = makeFlatVector<int32_t>(
+      numValues, [](auto row) { return row / 2; }, nullEvery(3));
+  auto indices = makeIndices(
+      numValues, [numValues](auto row) { return numValues - row - 1; });
+  auto nulls = makeNulls(numValues, [](auto row) { return row % 4 == 0; });
+  auto dictionary =
+      BaseVector::wrapInDictionary(nulls, indices, numValues, std::move(base));
+
+  testVectorPartitioning(dictionary);
+}
+
+TEST_P(PartitioningVectorTest, testDictionaryEncodedRowVector) {
+  const int numValues = GetParam();
+
+  auto row = makeRowVector(
+      {makeFlatVector<int32_t>(
+           numValues, [](auto row) { return row; }, nullEvery(3)),
+       makeFlatVector<int64_t>(numValues, [](auto row) { return row * 10; })},
+      nullEvery(5));
+  auto indices = makeIndices(
+      numValues, [numValues](auto row) { return numValues - row - 1; });
+  auto nulls = makeNulls(numValues, [](auto row) { return row % 4 == 0; });
+  auto dictionary =
+      BaseVector::wrapInDictionary(nulls, indices, numValues, row);
+
+  testVectorPartitioning(dictionary);
+}
+
+TEST_P(PartitioningVectorTest, testNestedDictionaryVector) {
+  const int numValues = GetParam();
+
+  auto base = makeFlatVector<int32_t>(
+      numValues, [](auto row) { return row; }, nullEvery(5));
+  auto inner = BaseVector::wrapInDictionary(
+      makeNulls(numValues, [](auto row) { return row % 6 == 0; }),
+      makeIndices(numValues, [numValues](auto row) { return row % numValues; }),
+      numValues,
+      base);
+  auto outer = BaseVector::wrapInDictionary(
+      makeNulls(numValues, [](auto row) { return row % 4 == 0; }),
+      makeIndices(
+          numValues, [numValues](auto row) { return numValues - row - 1; }),
+      numValues,
+      inner);
+
+  testVectorPartitioning(outer);
+}
+
 // Partitioning a null-free vector must not allocate a null buffer.
 TEST_P(PartitioningVectorTest, noNullBufferAllocatedForNullFreeFlat) {
   const int numValues = GetParam();
@@ -419,6 +470,31 @@ TEST_P(PartitioningVectorTest, numNullsAtFlatAllNulls) {
     const vector_size_t begin = p == 0 ? 0 : rawOffsets[p - 1];
     const vector_size_t numRowsInPartition = rawOffsets[p] - begin;
     EXPECT_EQ(pv->numNullsAt(p), numRowsInPartition) << "partition " << p;
+  }
+}
+
+TEST_P(PartitioningVectorTest, numNullsAtDictionary) {
+  const int numValues = GetParam();
+  auto base = makeFlatVector<int32_t>(
+      numValues, [](auto row) { return row; }, nullEvery(3));
+  auto dictionary = BaseVector::wrapInDictionary(
+      makeNulls(numValues, [](auto row) { return row % 4 == 0; }),
+      makeIndices(
+          numValues, [numValues](auto row) { return numValues - row - 1; }),
+      numValues,
+      base);
+
+  std::vector<uint32_t> partitions(numValues);
+  std::vector<vector_size_t> expected(3, 0);
+  for (int i = 0; i < numValues; ++i) {
+    partitions[i] = i % 3;
+    expected[partitions[i]] += dictionary->isNullAt(i);
+  }
+
+  auto pv =
+      PartitionedVector::create(dictionary, partitions, 3, ctx_, pool_.get());
+  for (uint32_t p = 0; p < 3; ++p) {
+    EXPECT_EQ(pv->numNullsAt(p), expected[p]) << "partition " << p;
   }
 }
 

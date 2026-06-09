@@ -227,6 +227,12 @@ class PrestoIterativePartitioningSerializer {
       const uint64_t* parentNulls,
       const std::vector<vector_size_t>* parentNullCountsPerPartition) const;
 
+  template <TypeKind kind>
+  void flushSingleDictionaryVector(
+      const PartitionedVectorPtr& partitionedVector,
+      const std::vector<IOBufOutputStream*>& outputStreams,
+      const uint64_t* parentNulls) const;
+
   void flushHeader(
       std::string_view name,
       const std::vector<uint32_t>& nonEmptyPartitions,
