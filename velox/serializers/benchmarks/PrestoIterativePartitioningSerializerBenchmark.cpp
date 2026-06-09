@@ -151,6 +151,22 @@ class PrestoIterativePartitioningSerializerBenchmark
     return makeRowVector({"v"}, {current});
   }
 
+  /// Creates a dictionary column over a 1'024-value null-free base with the
+  /// given wrapper null ratio.
+  VectorPtr
+  makeDictionaryColumn(vector_size_t size, TypeKind colKind, int32_t nullPct) {
+    const vector_size_t baseSize = std::min<vector_size_t>(size, 1'024);
+    auto base = makeFlatColumn(baseSize, colKind, 0);
+    auto indices =
+        makeIndices(size, [baseSize](auto row) { return row % baseSize; });
+    BufferPtr nulls =
+        nullPct == 0 ? nullptr : makeNulls(size, [nullPct](auto row) {
+          return (row % 100) < nullPct;
+        });
+    return BaseVector::wrapInDictionary(
+        std::move(nulls), std::move(indices), size, std::move(base));
+  }
+
   /// Creates a RowVector with numCols columns of the given TypeKind.
   RowVectorPtr makeInput(
       vector_size_t size,
@@ -176,6 +192,12 @@ class PrestoIterativePartitioningSerializerBenchmark
       case VectorEncoding::Simple::CONSTANT: {
         for (uint32_t i = 0; i < numCols; ++i) {
           children.push_back(makeConstantColumn(size, colKind, nullConstant));
+        }
+        break;
+      }
+      case VectorEncoding::Simple::DICTIONARY: {
+        for (uint32_t i = 0; i < numCols; ++i) {
+          children.push_back(makeDictionaryColumn(size, colKind, nullPct));
         }
         break;
       }
@@ -228,7 +250,12 @@ void benchmarkFlush(
       std::static_pointer_cast<const RowType>(input->type()), numPartitions);
 
   while (serializer->bytesBuffered() < kBufferSize) {
-    serializer->append(input, parts);
+    // Partitioning rearranges the appended vector in place, so each round
+    // must append a fresh copy of the input.
+    serializer->append(
+        std::static_pointer_cast<RowVector>(
+            input->testingCopyPreserveEncodings()),
+        parts);
   }
 
   suspender.dismiss();
@@ -245,6 +272,21 @@ void benchmarkFlushFlat(
     uint32_t numPartitions) {
   benchmarkFlush(
       VectorEncoding::Simple::FLAT,
+      colKind,
+      numCols,
+      nullPct,
+      false,
+      numPartitions);
+}
+
+void benchmarkFlushDictionary(
+    uint32_t /* iters */,
+    TypeKind colKind,
+    uint32_t numCols,
+    int32_t nullPct,
+    uint32_t numPartitions) {
+  benchmarkFlush(
+      VectorEncoding::Simple::DICTIONARY,
       colKind,
       numCols,
       nullPct,
@@ -283,7 +325,12 @@ void benchmarkFlushNestedRow(
   auto serializer = benchmark.makeSerializer(rowType, numPartitions);
 
   while (serializer->bytesBuffered() < kBufferSize) {
-    serializer->append(input, parts);
+    // Partitioning rearranges the appended vector in place, so each round
+    // must append a fresh copy of the input.
+    serializer->append(
+        std::static_pointer_cast<RowVector>(
+            input->testingCopyPreserveEncodings()),
+        parts);
   }
 
   suspender.dismiss();
@@ -309,7 +356,12 @@ void benchmarkFlushNestedRowWithNulls(
   auto serializer = benchmark.makeSerializer(rowType, numPartitions);
 
   while (serializer->bytesBuffered() < kBufferSize) {
-    serializer->append(input, parts);
+    // Partitioning rearranges the appended vector in place, so each round
+    // must append a fresh copy of the input.
+    serializer->append(
+        std::static_pointer_cast<RowVector>(
+            input->testingCopyPreserveEncodings()),
+        parts);
   }
 
   suspender.dismiss();
@@ -389,6 +441,32 @@ FLUSH_FOR_COLS(bigint, BIGINT)
 FLUSH_FOR_COLS(ldec, HUGEINT)
 FLUSH_FOR_COLS(varchar, VARCHAR)
 FLUSH_FOR_COLS(varbinary, VARBINARY)
+
+// Dictionary columns over a 1'024-value null-free base; nulls sit on the
+// wrapper. Fixed-width kinds exercise the shared chunked value writer;
+// VARCHAR exercises the variable-width dictionary path.
+//
+// Naming: dict_<type>_<N>cols_<P>pct_<K>parts
+#define FLUSH_DICT_PARAM(type_name, kind, num_cols, null_pct, num_parts)     \
+  BENCHMARK_NAMED_PARAM(                                                     \
+      benchmarkFlushDictionary,                                              \
+      dict_##type_name##_##num_cols##cols_##null_pct##pct_##num_parts##parts,\
+      TypeKind::kind,                                                        \
+      num_cols,                                                              \
+      null_pct,                                                              \
+      num_parts)
+
+#define FLUSH_DICT_FOR_PARTS(type_name, kind, num_cols, null_pct) \
+  FLUSH_DICT_PARAM(type_name, kind, num_cols, null_pct, 4)        \
+  FLUSH_DICT_PARAM(type_name, kind, num_cols, null_pct, 64)       \
+  FLUSH_DICT_PARAM(type_name, kind, num_cols, null_pct, 256)
+
+FLUSH_DICT_FOR_PARTS(bigint, BIGINT, 1, 0)
+FLUSH_DICT_FOR_PARTS(bigint, BIGINT, 1, 25)
+FLUSH_DICT_FOR_PARTS(bigint, BIGINT, 1, 75)
+FLUSH_DICT_FOR_PARTS(bigint, BIGINT, 4, 25)
+FLUSH_DICT_FOR_PARTS(bool, BOOLEAN, 1, 25)
+FLUSH_DICT_FOR_PARTS(varchar, VARCHAR, 1, 25)
 
 // Nested ROW benchmarks: a single column with N levels of ROW wrapping a
 // BIGINT leaf, across the same partition counts as the flat benchmarks.
