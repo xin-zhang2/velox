@@ -239,6 +239,16 @@ class PrestoIterativePartitioningSerializer {
       const std::vector<IOBufOutputStream*>& outputStreams,
       const std::vector<vector_size_t>* parentLiveCounts) const;
 
+  // Writes the values of one partitioned dictionary-encoded fixed-width
+  // vector to each partition's stream, omitting rows that are null or whose
+  // parent row is null. Values are gathered through the dictionary indices
+  // into a scratch chunk before writing.
+  template <TypeKind kind>
+  void flushSingleDictionaryVector(
+      const PartitionedVectorPtr& partitionedVector,
+      const std::vector<IOBufOutputStream*>& outputStreams,
+      const uint64_t* parentNulls) const;
+
   void flushHeader(
       std::string_view name,
       const std::vector<uint32_t>& nonEmptyPartitions,
@@ -282,14 +292,6 @@ class PrestoIterativePartitioningSerializer {
       const std::vector<vector_size_t>& nullCounts,
       const std::vector<uint64_t*>& validBits) const;
 
-  template <typename T>
-  void flushFlatValues(
-      const T* partitionedValues,
-      const uint64_t* rawNulls,
-      const uint64_t* parentNulls,
-      const vector_size_t* partitionOffsets,
-      const std::vector<IOBufOutputStream*>& outputStreams) const;
-
   void flushOffsets(
       const ColumnBufferState& columnState,
       const std::vector<uint32_t>& nonEmptyPartitions,
@@ -315,6 +317,10 @@ class PrestoIterativePartitioningSerializer {
   /// Accumulated state for all batches buffered since the last
   /// flush.
   std::unique_ptr<BufferState> bufferState_;
+
+  // Reusable scratch memory for the chunked value writes in the flush
+  // methods.
+  mutable Scratch scratch_;
 };
 
 } // namespace facebook::velox::serializer::presto
