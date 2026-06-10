@@ -103,9 +103,7 @@ function get_cxx_flags {
       else # x86_64
         local CPU_CAPABILITIES
         CPU_CAPABILITIES=$(sysctl -a | grep machdep.cpu.features | awk '{print tolower($0)}')
-        if [[ $CPU_CAPABILITIES =~ "avx512f" ]]; then
-          CPU_ARCH="avx512"
-        elif [[ $CPU_CAPABILITIES =~ "avx" ]]; then
+        if [[ $CPU_CAPABILITIES =~ "avx" ]]; then
           CPU_ARCH="avx"
         else
           CPU_ARCH="sse"
@@ -117,9 +115,7 @@ function get_cxx_flags {
       else # x86_64
         local CPU_CAPABILITIES
         CPU_CAPABILITIES=$(cat /proc/cpuinfo | grep flags | head -n 1 | awk '{print tolower($0)}')
-        if [[ $CPU_CAPABILITIES =~ "avx512f" ]]; then
-          CPU_ARCH="avx512"
-        elif [[ $CPU_CAPABILITIES =~ "avx" ]]; then
+        if [[ $CPU_CAPABILITIES =~ "avx" ]]; then
           CPU_ARCH="avx"
         elif [[ $CPU_CAPABILITIES =~ "sse" ]]; then
           CPU_ARCH="sse"
@@ -134,10 +130,6 @@ function get_cxx_flags {
 
   "arm64")
     echo -n "-mcpu=apple-m1+crc"
-    ;;
-
-  "avx512")
-    echo -n "-mavx512f -mavx2 -mfma -mavx -mf16c -mlzcnt -mbmi2"
     ;;
 
   "avx")
