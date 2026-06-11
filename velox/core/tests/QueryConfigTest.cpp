@@ -48,6 +48,17 @@ TEST_F(QueryConfigTest, setConfig) {
   EXPECT_EQ(config.requestDataSizesMaxWaitSec(), 12);
 }
 
+TEST_F(QueryConfigTest, optimizedPartitioningConfigs) {
+  std::unordered_map<std::string, std::string> configData(
+      {{"optimized_partitioned_output_enabled", "true"},
+       {"optimized_hash_partition_function_enabled", "true"}});
+  auto queryCtx = QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
+  const QueryConfig& config = queryCtx->queryConfig();
+
+  EXPECT_TRUE(config.optimizedPartitionedOutputEnabled());
+  EXPECT_TRUE(config.optimizedHashPartitionFunctionEnabled());
+}
+
 TEST_F(QueryConfigTest, invalidConfig) {
   std::unordered_map<std::string, std::string> configData(
       {{QueryConfig::kSessionTimezone, "invalid"}});
