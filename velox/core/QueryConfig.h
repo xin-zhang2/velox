@@ -1502,7 +1502,7 @@ class QueryConfig {
   VELOX_QUERY_CONFIG(
       kOptimizedPartitionedOutputEnabled,
       optimizedPartitionedOutputEnabled,
-      "optimized_repartitioning",
+      "optimized_partitioned_output_enabled",
       bool,
       false,
       "Enable OptimizedPartitionedOutput operator.");
