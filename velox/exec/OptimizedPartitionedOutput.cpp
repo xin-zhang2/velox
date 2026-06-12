@@ -73,6 +73,18 @@ OptimizedPartitionedOutput::OptimizedPartitionedOutput(
 
   initializeSerializerLayout();
 
+  std::function<std::unique_ptr<OutputStreamListener>()> listenerFactory =
+      nullptr;
+  if (operatorCtx_->driverCtx()->queryConfig().isExchangeChecksumEnabled()) {
+    listenerFactory = [bufferManager = bufferManager_]()
+        -> std::unique_ptr<OutputStreamListener> {
+      auto lockedBufferManager = bufferManager.lock();
+      VELOX_CHECK_NOT_NULL(
+          lockedBufferManager, "OutputBufferManager was already destructed");
+      return lockedBufferManager->newListener();
+    };
+  }
+
   serializer_ = std::make_unique<
       serializer::presto::PrestoIterativePartitioningSerializer>(
       outputType_,
@@ -80,13 +92,7 @@ OptimizedPartitionedOutput::OptimizedPartitionedOutput(
       options,
       pool_,
       serializerInputByOutput_,
-      [bufferManager =
-           bufferManager_]() -> std::unique_ptr<OutputStreamListener> {
-        auto lockedBufferManager = bufferManager.lock();
-        VELOX_CHECK_NOT_NULL(
-            lockedBufferManager, "OutputBufferManager was already destructed");
-        return lockedBufferManager->newListener();
-      });
+      std::move(listenerFactory));
 }
 
 void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
