@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <cstring>
 #include <future>
 #include <random>
 #include <string_view>
@@ -48,6 +49,22 @@ int64_t simpleColumnPageBytes(
       1 + // null flag
       (numNulls > 0 ? bits::nbytes(numRows) : 0) + // null bitmap
       (numRows - numNulls) * valueWidth; // values
+}
+
+constexpr int kCodecByteOffset = 4;
+constexpr int kChecksumOffset = 13;
+constexpr int8_t kChecksumBitMask = 4;
+
+int8_t codecByte(const folly::IOBuf& iobuf) {
+  VELOX_CHECK_GE(iobuf.length(), kChecksumOffset + 8);
+  return reinterpret_cast<const int8_t*>(iobuf.data())[kCodecByteOffset];
+}
+
+int64_t checksumField(const folly::IOBuf& iobuf) {
+  VELOX_CHECK_GE(iobuf.length(), kChecksumOffset + 8);
+  int64_t value = 0;
+  std::memcpy(&value, iobuf.data() + kChecksumOffset, sizeof(value));
+  return value;
 }
 
 } // namespace
@@ -913,6 +930,34 @@ TEST_F(OptimizedPartitionedOutputTest, preFlushWhenEstimateExceedsLimit) {
 
   auto expected = makeRowVector({"v"}, {makeFlatVector<int64_t>({10, 20})});
   auto actual = concatPages(result.pages[0], rowType);
+  velox::test::assertEqualVectors(expected, actual);
+}
+
+TEST_F(OptimizedPartitionedOutputTest, exchangeChecksumToggle) {
+  auto rowType = ROW({"v"}, {BIGINT()});
+  auto makeInputBatch = [&]() {
+    return makeRowVector({"v"}, {makeFlatVector<int64_t>({10, 20, 30})});
+  };
+
+  auto noChecksumResult = runPartitionedOutput(
+      "local://test-optimized-no-checksum", {makeInputBatch()}, {}, 1);
+  ASSERT_EQ(noChecksumResult.pageCounts[0], 1);
+  EXPECT_EQ(codecByte(*noChecksumResult.pages[0][0]) & kChecksumBitMask, 0);
+  EXPECT_EQ(checksumField(*noChecksumResult.pages[0][0]), 0);
+
+  auto checksumResult = runPartitionedOutput(
+      "local://test-optimized-with-checksum",
+      {makeInputBatch()},
+      {},
+      1,
+      {{core::QueryConfig::kExchangeChecksum, "true"}});
+  ASSERT_EQ(checksumResult.pageCounts[0], 1);
+  EXPECT_NE(codecByte(*checksumResult.pages[0][0]) & kChecksumBitMask, 0);
+  EXPECT_NE(checksumField(*checksumResult.pages[0][0]), 0);
+
+  auto expected =
+      makeRowVector({"v"}, {makeFlatVector<int64_t>({10, 20, 30})});
+  auto actual = concatPages(checksumResult.pages[0], rowType);
   velox::test::assertEqualVectors(expected, actual);
 }
 
