@@ -561,7 +561,7 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
         auto partitionedOutputNode =
             std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
                 planNode)) {
-      if (ctx->queryConfig().optimizedPartitionedOutputEnabled()) {
+      if (ctx->queryConfig().optimizedPartitionedOutputEnabled() && !partitionedOutputNode->isReplicateNullsAndAny()) {
         operators.push_back(
             std::make_unique<OptimizedPartitionedOutput>(
                 id, ctx.get(), partitionedOutputNode));
