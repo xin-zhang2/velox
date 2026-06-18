@@ -23,6 +23,7 @@
 #include "velox/type/Type.h"
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/ConstantVector.h"
+#include "velox/vector/DictionaryVector.h"
 #include "velox/vector/FlatVector.h"
 
 namespace facebook::velox::serializer::presto {
@@ -1589,16 +1590,30 @@ void PrestoIterativePartitioningSerializer::flushSingleFlatVector<
   const auto* rawNulls = flatVector->baseVector()->rawNulls();
   const auto* partitionOffsets = flatVector->rawPartitionOffsets();
 
-  // TODO: Improve performance
+  Scratch scratch;
+  ScratchPtr<int8_t> values(scratch);
+  constexpr auto numRowsPerChunk = std::max<vector_size_t>(1, kChunkBytes);
+  int8_t* chunk = nullptr;
+
   vector_size_t lastOffset = 0;
   for (uint32_t p = 0; p < numPartitions_; ++p) {
     const auto offset = partitionOffsets[p];
     const auto numValues = offset - lastOffset;
     if (outputStreams[p] != nullptr && numValues > 0) {
+      if (chunk == nullptr) {
+        chunk = values.get(numRowsPerChunk);
+      }
+      vector_size_t count = 0;
       if (!parentNulls && !rawNulls) {
         for (vector_size_t i = lastOffset; i < offset; ++i) {
-          const int8_t val = bits::isBitSet(rawBoolValues, i) ? 1 : 0;
-          outputStreams[p]->write(reinterpret_cast<const char*>(&val), 1);
+          chunk[count++] = bits::isBitSet(rawBoolValues, i) ? 1 : 0;
+          if (count == numRowsPerChunk) {
+            outputStreams[p]->write(reinterpret_cast<const char*>(chunk), count);
+            count = 0;
+          }
+        }
+        if (count > 0) {
+          outputStreams[p]->write(reinterpret_cast<const char*>(chunk), count);
         }
       } else {
         for (vector_size_t i = lastOffset; i < offset; ++i) {
@@ -1606,9 +1621,15 @@ void PrestoIterativePartitioningSerializer::flushSingleFlatVector<
               !parentNulls || bits::isBitSet(parentNulls, i);
           const bool rowIsNull = rawNulls && bits::isBitNull(rawNulls, i);
           if (parentLive && !rowIsNull) {
-            const int8_t val = bits::isBitSet(rawBoolValues, i) ? 1 : 0;
-            outputStreams[p]->write(reinterpret_cast<const char*>(&val), 1);
+            chunk[count++] = bits::isBitSet(rawBoolValues, i) ? 1 : 0;
+            if (count == numRowsPerChunk) {
+              outputStreams[p]->write(reinterpret_cast<const char*>(chunk), count);
+              count = 0;
+            }
           }
+        }
+        if (count > 0) {
+          outputStreams[p]->write(reinterpret_cast<const char*>(chunk), count);
         }
       }
     }
@@ -1689,27 +1710,76 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector(
     const uint64_t* parentNulls) const {
   using T = typename TypeTraits<kind>::NativeType;
   auto baseVector = partitionedVector->baseVector();
-  auto* simpleVector = baseVector->as<SimpleVector<T>>();
+  auto* simpleVector = baseVector->as<DictionaryVector<T>>();
   VELOX_DCHECK_NOT_NULL(simpleVector);
   const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
+
+  Scratch scratch;
+  ScratchPtr<T> values(scratch);
+  const auto numRowsPerChunk =
+      std::max<vector_size_t>(1, kChunkBytes / sizeof(T));
+  auto* chunk = values.get(numRowsPerChunk);
 
   vector_size_t lastOffset = 0;
   for (uint32_t p = 0; p < numPartitions_; ++p) {
     const auto offset = partitionOffsets[p];
     if (outputStreams[p] != nullptr && offset > lastOffset) {
+      vector_size_t count = 0;
       for (vector_size_t i = lastOffset; i < offset; ++i) {
         if ((parentNulls == nullptr || bits::isBitSet(parentNulls, i)) &&
             !simpleVector->isNullAt(i)) {
-          if constexpr (kind == TypeKind::BOOLEAN) {
-            const int8_t value = simpleVector->valueAt(i) ? 1 : 0;
+          chunk[count++] = simpleVector->valueAtFast(i);
+          if (count == numRowsPerChunk) {
             outputStreams[p]->write(
-                reinterpret_cast<const char*>(&value), sizeof(value));
-          } else {
-            const T value = simpleVector->valueAt(i);
-            outputStreams[p]->write(
-                reinterpret_cast<const char*>(&value), sizeof(value));
+                reinterpret_cast<const char*>(chunk), count * sizeof(T));
+            count = 0;
           }
         }
+      }
+      if (count > 0) {
+        outputStreams[p]->write(
+            reinterpret_cast<const char*>(chunk), count * sizeof(T));
+      }
+    }
+    lastOffset = offset;
+  }
+}
+
+template <>
+void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector<
+    TypeKind::BOOLEAN>(
+    const PartitionedVectorPtr& partitionedVector,
+    const std::vector<IOBufOutputStream*>& outputStreams,
+    const uint64_t* parentNulls) const {
+  auto baseVector = partitionedVector->baseVector();
+  auto* simpleVector = baseVector->as<DictionaryVector<bool>>();
+  VELOX_DCHECK_NOT_NULL(simpleVector);
+  const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
+
+  Scratch scratch;
+  ScratchPtr<int8_t> values(scratch);
+  constexpr auto numRowsPerChunk = std::max<vector_size_t>(1, kChunkBytes);
+  auto* chunk = values.get(numRowsPerChunk);
+
+  vector_size_t lastOffset = 0;
+  for (uint32_t p = 0; p < numPartitions_; ++p) {
+    const auto offset = partitionOffsets[p];
+    if (outputStreams[p] != nullptr && offset > lastOffset) {
+      vector_size_t count = 0;
+      for (vector_size_t i = lastOffset; i < offset; ++i) {
+        if ((parentNulls == nullptr || bits::isBitSet(parentNulls, i)) &&
+            !simpleVector->isNullAt(i)) {
+          chunk[count++] = simpleVector->valueAtFast(i) ? 1 : 0;
+          if (count == numRowsPerChunk) {
+            outputStreams[p]->write(
+                reinterpret_cast<const char*>(chunk), count);
+            count = 0;
+          }
+        }
+      }
+      if (count > 0) {
+        outputStreams[p]->write(
+            reinterpret_cast<const char*>(chunk), count);
       }
     }
     lastOffset = offset;
@@ -2046,6 +2116,12 @@ void PrestoIterativePartitioningSerializer::flushFlatValues(
     const vector_size_t* partitionOffsets,
     const std::vector<IOBufOutputStream*>& outputStreams) const {
   const auto typeWidth = sizeof(T);
+
+  Scratch scratch;
+  ScratchPtr<T> values(scratch);
+  const auto numRowsPerChunk = std::max<vector_size_t>(1, kChunkBytes / typeWidth);
+  T* chunk = nullptr;
+
   vector_size_t lastOffset = 0;
   for (uint32_t p = 0; p < numPartitions_; ++p) {
     const auto offset = partitionOffsets[p];
@@ -2062,16 +2138,27 @@ void PrestoIterativePartitioningSerializer::flushFlatValues(
         // and not null themselves; null slots are omitted. parentNulls and
         // rawNulls are indexed in the full row space [0, size), so iterate the
         // partition's own range [lastOffset, offset).
-        // TODO: Improve performance.
+        if (chunk == nullptr) {
+          chunk = values.get(numRowsPerChunk);
+        }
+
+        vector_size_t count = 0;
         for (vector_size_t i = lastOffset; i < offset; ++i) {
           const bool parentLive =
               !parentNulls || bits::isBitSet(parentNulls, i);
           const bool rowIsNull = rawNulls && bits::isBitNull(rawNulls, i);
           if (parentLive && !rowIsNull) {
-            outputStreams[p]->write(
-                reinterpret_cast<const char*>(&partitionedValues[i]),
-                typeWidth);
+            chunk[count++] = partitionedValues[i];
+            if (count == numRowsPerChunk) {
+              outputStreams[p]->write(
+                  reinterpret_cast<const char*>(chunk), count * typeWidth);
+              count = 0;
+            }
           }
+        }
+        if (count > 0) {
+          outputStreams[p]->write(
+              reinterpret_cast<const char*>(chunk), count * typeWidth);
         }
       }
     }
