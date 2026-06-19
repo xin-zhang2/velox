@@ -1710,9 +1710,10 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector(
     const uint64_t* parentNulls) const {
   using T = typename TypeTraits<kind>::NativeType;
   auto baseVector = partitionedVector->baseVector();
-  auto* simpleVector = baseVector->as<DictionaryVector<T>>();
-  VELOX_DCHECK_NOT_NULL(simpleVector);
+  auto* dictionaryVector = baseVector->as<DictionaryVector<T>>();
+  VELOX_DCHECK_NOT_NULL(dictionaryVector);
   const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
+  const bool dictMayHaveNulls = dictionaryVector->mayHaveNulls();
 
   Scratch scratch;
   ScratchPtr<T> values(scratch);
@@ -1724,21 +1725,88 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector(
   for (uint32_t p = 0; p < numPartitions_; ++p) {
     const auto offset = partitionOffsets[p];
     if (outputStreams[p] != nullptr && offset > lastOffset) {
-      vector_size_t count = 0;
-      for (vector_size_t i = lastOffset; i < offset; ++i) {
-        if ((parentNulls == nullptr || bits::isBitSet(parentNulls, i)) &&
-            !simpleVector->isNullAt(i)) {
-          chunk[count++] = simpleVector->valueAtFast(i);
-          if (count == numRowsPerChunk) {
+      const auto numValues = offset - lastOffset;
+      if (!parentNulls && !dictMayHaveNulls) {
+        const auto numChunks = numValues / numRowsPerChunk;
+        for (auto chunkIndex = 0; chunkIndex < numChunks; ++chunkIndex) {
+          const auto chunkStartOffset =
+              lastOffset + chunkIndex * numRowsPerChunk;
+          for (vector_size_t i = 0; i < numRowsPerChunk; ++i) {
+            chunk[i] = dictionaryVector->valueAtFast(chunkStartOffset + i);
+          }
+          outputStreams[p]->write(
+              reinterpret_cast<const char*>(chunk),
+              numRowsPerChunk * sizeof(T));
+        }
+        const auto tailOffset = lastOffset + numRowsPerChunk * numChunks;
+        const auto tailSize = numValues - numChunks * numRowsPerChunk;
+        if (tailSize > 0) {
+          for (vector_size_t i = 0; i < tailSize; ++i) {
+            chunk[i] = dictionaryVector->valueAtFast(tailOffset + i);
+          }
+          outputStreams[p]->write(
+              reinterpret_cast<const char*>(chunk), tailSize * sizeof(T));
+        }
+      } else {
+        // TODO: Improve performance
+        vector_size_t count = 0;
+        if (!parentNulls) {
+          const auto numNonNull = numValues - partitionedVector->numNullsAt(p);
+          vector_size_t i = lastOffset;
+          const auto numChunks = numNonNull / numRowsPerChunk;
+          for (vector_size_t chunkIndex = 0; chunkIndex < numChunks;
+               ++chunkIndex) {
+            vector_size_t chunkCount = 0;
+            while (chunkCount < numRowsPerChunk) {
+              if (!dictionaryVector->isNullAt(i)) {
+                chunk[chunkCount++] = dictionaryVector->valueAtFast(i);
+              }
+              ++i;
+            }
             outputStreams[p]->write(
-                reinterpret_cast<const char*>(chunk), count * sizeof(T));
-            count = 0;
+                reinterpret_cast<const char*>(chunk),
+                numRowsPerChunk * sizeof(T));
+          }
+          const auto tailSize = numNonNull - numChunks * numRowsPerChunk;
+          if (tailSize > 0) {
+            vector_size_t chunkCount = 0;
+            while (chunkCount < tailSize) {
+              if (!dictionaryVector->isNullAt(i)) {
+                chunk[chunkCount++] = dictionaryVector->valueAtFast(i);
+              }
+              ++i;
+            }
+            outputStreams[p]->write(
+                reinterpret_cast<const char*>(chunk), tailSize * sizeof(T));
+          }
+        } else if (!dictMayHaveNulls) {
+          for (vector_size_t i = lastOffset; i < offset; ++i) {
+            if (bits::isBitSet(parentNulls, i)) {
+              chunk[count++] = dictionaryVector->valueAtFast(i);
+              if (count == numRowsPerChunk) {
+                outputStreams[p]->write(
+                    reinterpret_cast<const char*>(chunk), count * sizeof(T));
+                count = 0;
+              }
+            }
+          }
+        } else {
+          for (vector_size_t i = lastOffset; i < offset; ++i) {
+            if (bits::isBitSet(parentNulls, i) &&
+                !dictionaryVector->isNullAt(i)) {
+              chunk[count++] = dictionaryVector->valueAtFast(i);
+              if (count == numRowsPerChunk) {
+                outputStreams[p]->write(
+                    reinterpret_cast<const char*>(chunk), count * sizeof(T));
+                count = 0;
+              }
+            }
           }
         }
-      }
-      if (count > 0) {
-        outputStreams[p]->write(
-            reinterpret_cast<const char*>(chunk), count * sizeof(T));
+        if (count > 0) {
+          outputStreams[p]->write(
+              reinterpret_cast<const char*>(chunk), count * sizeof(T));
+        }
       }
     }
     lastOffset = offset;
@@ -1752,9 +1820,10 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector<
     const std::vector<IOBufOutputStream*>& outputStreams,
     const uint64_t* parentNulls) const {
   auto baseVector = partitionedVector->baseVector();
-  auto* simpleVector = baseVector->as<DictionaryVector<bool>>();
-  VELOX_DCHECK_NOT_NULL(simpleVector);
+  auto* dictionaryVector = baseVector->as<DictionaryVector<bool>>();
+  VELOX_DCHECK_NOT_NULL(dictionaryVector);
   const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
+  const bool dictMayHaveNulls = dictionaryVector->mayHaveNulls();
 
   Scratch scratch;
   ScratchPtr<int8_t> values(scratch);
@@ -1765,21 +1834,86 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector<
   for (uint32_t p = 0; p < numPartitions_; ++p) {
     const auto offset = partitionOffsets[p];
     if (outputStreams[p] != nullptr && offset > lastOffset) {
-      vector_size_t count = 0;
-      for (vector_size_t i = lastOffset; i < offset; ++i) {
-        if ((parentNulls == nullptr || bits::isBitSet(parentNulls, i)) &&
-            !simpleVector->isNullAt(i)) {
-          chunk[count++] = simpleVector->valueAtFast(i) ? 1 : 0;
-          if (count == numRowsPerChunk) {
+      const auto numValues = offset - lastOffset;
+      if (!parentNulls && !dictMayHaveNulls) {
+        const auto numChunks = numValues / numRowsPerChunk;
+        for (auto chunkIndex = 0; chunkIndex < numChunks; ++chunkIndex) {
+          const auto chunkStartOffset =
+              lastOffset + chunkIndex * numRowsPerChunk;
+          for (vector_size_t i = 0; i < numRowsPerChunk; ++i) {
+            chunk[i] =
+                dictionaryVector->valueAtFast(chunkStartOffset + i) ? 1 : 0;
+          }
+          outputStreams[p]->write(
+              reinterpret_cast<const char*>(chunk), numRowsPerChunk);
+        }
+        const auto tailOffset = lastOffset + numRowsPerChunk * numChunks;
+        const auto tailSize = numValues - numChunks * numRowsPerChunk;
+        if (tailSize > 0) {
+          for (vector_size_t i = 0; i < tailSize; ++i) {
+            chunk[i] = dictionaryVector->valueAtFast(tailOffset + i) ? 1 : 0;
+          }
+          outputStreams[p]->write(
+              reinterpret_cast<const char*>(chunk), tailSize);
+        }
+      } else {
+        // TODO: Improve performance
+        vector_size_t count = 0;
+        if (!parentNulls) {
+          const auto numNonNull = numValues - partitionedVector->numNullsAt(p);
+          vector_size_t i = lastOffset;
+          const auto numChunks = numNonNull / numRowsPerChunk;
+          for (vector_size_t chunkIndex = 0; chunkIndex < numChunks;
+               ++chunkIndex) {
+            vector_size_t chunkCount = 0;
+            while (chunkCount < numRowsPerChunk) {
+              if (!dictionaryVector->isNullAt(i)) {
+                chunk[chunkCount++] = dictionaryVector->valueAtFast(i) ? 1 : 0;
+              }
+              ++i;
+            }
             outputStreams[p]->write(
-                reinterpret_cast<const char*>(chunk), count);
-            count = 0;
+                reinterpret_cast<const char*>(chunk), numRowsPerChunk);
+          }
+          const auto tailSize = numNonNull - numChunks * numRowsPerChunk;
+          if (tailSize > 0) {
+            vector_size_t chunkCount = 0;
+            while (chunkCount < tailSize) {
+              if (!dictionaryVector->isNullAt(i)) {
+                chunk[chunkCount++] = dictionaryVector->valueAtFast(i) ? 1 : 0;
+              }
+              ++i;
+            }
+            outputStreams[p]->write(
+                reinterpret_cast<const char*>(chunk), tailSize);
+          }
+        } else if (!dictMayHaveNulls) {
+          for (vector_size_t i = lastOffset; i < offset; ++i) {
+            if (bits::isBitSet(parentNulls, i)) {
+              chunk[count++] = dictionaryVector->valueAtFast(i) ? 1 : 0;
+              if (count == numRowsPerChunk) {
+                outputStreams[p]->write(
+                    reinterpret_cast<const char*>(chunk), count);
+                count = 0;
+              }
+            }
+          }
+        } else {
+          for (vector_size_t i = lastOffset; i < offset; ++i) {
+            if (bits::isBitSet(parentNulls, i) &&
+                !dictionaryVector->isNullAt(i)) {
+              chunk[count++] = dictionaryVector->valueAtFast(i) ? 1 : 0;
+              if (count == numRowsPerChunk) {
+                outputStreams[p]->write(
+                    reinterpret_cast<const char*>(chunk), count);
+                count = 0;
+              }
+            }
           }
         }
-      }
-      if (count > 0) {
-        outputStreams[p]->write(
-            reinterpret_cast<const char*>(chunk), count);
+        if (count > 0) {
+          outputStreams[p]->write(reinterpret_cast<const char*>(chunk), count);
+        }
       }
     }
     lastOffset = offset;
