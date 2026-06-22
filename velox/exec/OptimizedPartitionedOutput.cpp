@@ -96,7 +96,8 @@ void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
 
   auto serializerInput = prepareSerializerInput(input);
 
-  if (serializer_->estimateBytesAfterAppend(serializerInput) >
+  if (serializer_->maxRowsBufferedPerPartition() >= kMaxRowsPerDestinationBeforeFlush ||
+    serializer_->estimateBytesAfterAppend(serializerInput) >
       maxOutputBufferBytes_) {
     flush();
   }
@@ -127,7 +128,8 @@ RowVectorPtr OptimizedPartitionedOutput::getOutput() {
 
   blockingReason_ = BlockingReason::kNotBlocked;
 
-  if (noMoreInput_ || serializer_->bytesBuffered() >= maxOutputBufferBytes_) {
+  if (noMoreInput_ || serializer_->bytesBuffered() >= maxOutputBufferBytes_ ||
+    serializer_->maxRowsBufferedPerPartition() >= kMaxRowsPerDestinationBeforeFlush) {
     flush();
   }
 
