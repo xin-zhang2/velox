@@ -1009,6 +1009,16 @@ vector_size_t PrestoIterativePartitioningSerializer::rowsBuffered() const {
   return bufferState_->rowsBuffered();
 }
 
+vector_size_t
+PrestoIterativePartitioningSerializer::maxRowsBufferedPerPartition() const {
+  const auto& rowsPerPartition = bufferState_->rowsPerPartition();
+  if (rowsPerPartition.empty()) {
+    return 0;
+  }
+
+  return *std::max_element(rowsPerPartition.begin(), rowsPerPartition.end());
+}
+
 void PrestoIterativePartitioningSerializer::clear() {
   partitionedRowVectors_.clear();
   bufferState_->clear();

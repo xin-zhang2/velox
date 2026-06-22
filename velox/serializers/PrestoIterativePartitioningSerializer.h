@@ -122,6 +122,10 @@ class PrestoIterativePartitioningSerializer {
   /// Returns the total number of rows appended since the last flush.
   vector_size_t rowsBuffered() const;
 
+  /// Returns the maximum number of rows buffered in any single partition since
+  /// the last flush.
+  vector_size_t maxRowsBufferedPerPartition() const;
+
  private:
   // State threaded through the recursive column flush.
   struct SerializerContext {
