@@ -32,6 +32,7 @@ class OptimizedPartitionedOutput : public Operator {
   /// Minimum flush size for non-final flush; 60 KB + overhead fits a 64 KB
   /// network MTU.
   static constexpr uint64_t kMinDestinationSize = 60 * 1024;
+  static constexpr vector_size_t kMaxRowsPerDestinationBeforeFlush = 10'000;
 
   OptimizedPartitionedOutput(
       int32_t operatorId,
