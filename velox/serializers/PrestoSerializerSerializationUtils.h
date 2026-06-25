@@ -17,7 +17,9 @@
 #include <folly/IPAddressV6.h>
 
 #include "velox/common/memory/ByteStream.h"
+#include "velox/functions/prestosql/types/IPAddressType.h"
 #include "velox/functions/prestosql/types/IPPrefixType.h"
+#include "velox/functions/prestosql/types/UuidType.h"
 #include "velox/serializers/PrestoSerializer.h"
 #include "velox/serializers/VectorStream.h"
 #include "velox/type/DecimalUtil.h"
@@ -90,6 +92,26 @@ FOLLY_ALWAYS_INLINE int128_t toJavaUuidValue(int128_t value) {
   // int128 will be serialized with [lower, upper], so swap here
   // to adjust the order.
   return DecimalUtil::bigEndian(value);
+}
+
+using Int128ValueTransform = int128_t (*)(int128_t);
+
+FOLLY_ALWAYS_INLINE int128_t identityInt128Value(int128_t value) {
+  return value;
+}
+
+FOLLY_ALWAYS_INLINE Int128ValueTransform
+int128ValueTransformForType(const TypePtr& type) {
+  if (type->isLongDecimal()) {
+    return toJavaDecimalValue;
+  }
+  if (isUuidType(type)) {
+    return toJavaUuidValue;
+  }
+  if (isIPAddressType(type)) {
+    return reverseIpAddressByteOrder;
+  }
+  return identityInt128Value;
 }
 
 inline void writeInt32(OutputStream* out, int32_t value) {

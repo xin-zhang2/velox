@@ -1757,6 +1757,149 @@ TEST_F(
 
 TEST_F(
     PrestoIterativePartitioningSerializerTest,
+    longDecimalRoundTripAcrossEncodings) {
+  auto decimalType = DECIMAL(20, 3);
+  auto type = ROW({"d"}, {decimalType});
+  auto serializer = makeSerializer(type, 2);
+
+  serializer->append(
+      makeRowVector(
+          {"d"},
+          {makeFlatVector<int128_t>(
+              {int128_t(-1234567890123LL),
+               int128_t(42),
+               int128_t(0),
+               int128_t(9876543210123LL)},
+              decimalType)}),
+      {0, 1, 0, 1});
+
+  serializer->append(
+      makeRowVector(
+          {"d"},
+          {makeNullableFlatVector<int128_t>(
+              {std::nullopt,
+               int128_t(-1),
+               int128_t(2222222222222LL),
+               std::nullopt},
+              decimalType)}),
+      {1, 0, 1, 0});
+
+  auto constantBase =
+      makeFlatVector<int128_t>({int128_t(-9000000000000LL)}, decimalType);
+  serializer->append(
+      makeRowVector({"d"}, {BaseVector::wrapInConstant(3, 0, constantBase)}),
+      {0, 1, 0});
+
+  auto dictionaryBase = makeFlatVector<int128_t>(
+      {int128_t(123456789012LL),
+       int128_t(-555555555555LL),
+       int128_t(333333333333LL)},
+      decimalType);
+  auto dictionary = BaseVector::wrapInDictionary(
+      nullptr, makeIndices({2, 0, 1, 2}), 4, dictionaryBase);
+  serializer->append(makeRowVector({"d"}, {dictionary}), {0, 1, 0, 1});
+
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto r0 = deserialize(*ioBufs.at(0).first, type);
+  EXPECT_EQ(
+      sortedNullableValues<int128_t>(r0, 0),
+      (std::vector<std::optional<int128_t>>{
+          std::nullopt,
+          int128_t(-9000000000000LL),
+          int128_t(-9000000000000LL),
+          int128_t(-1234567890123LL),
+          int128_t(-555555555555LL),
+          int128_t(-1),
+          int128_t(0),
+          int128_t(333333333333LL)}));
+
+  auto r1 = deserialize(*ioBufs.at(1).first, type);
+  EXPECT_EQ(
+      sortedNullableValues<int128_t>(r1, 0),
+      (std::vector<std::optional<int128_t>>{
+          std::nullopt,
+          int128_t(-9000000000000LL),
+          int128_t(42),
+          int128_t(123456789012LL),
+          int128_t(333333333333LL),
+          int128_t(2222222222222LL),
+          int128_t(9876543210123LL)}));
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    uuidRoundTripAcrossEncodings) {
+  auto type = ROW({"u"}, {UUID()});
+  auto serializer = makeSerializer(type, 2);
+
+  serializer->append(
+      makeRowVector(
+          {"u"},
+          {makeFlatVector<int128_t>(
+              {HugeInt::build(1, 2),
+               HugeInt::build(3, 4),
+               HugeInt::build(5, 6),
+               HugeInt::build(7, 8)},
+              UUID())}),
+      {0, 1, 0, 1});
+
+  serializer->append(
+      makeRowVector(
+          {"u"},
+          {makeNullableFlatVector<int128_t>(
+              {std::nullopt,
+               HugeInt::build(9, 10),
+               HugeInt::build(11, 12),
+               std::nullopt},
+              UUID())}),
+      {1, 0, 1, 0});
+
+  auto constantBase =
+      makeFlatVector<int128_t>({HugeInt::build(13, 14)}, UUID());
+  serializer->append(
+      makeRowVector({"u"}, {BaseVector::wrapInConstant(3, 0, constantBase)}),
+      {0, 1, 0});
+
+  auto dictionaryBase = makeFlatVector<int128_t>(
+      {HugeInt::build(15, 16), HugeInt::build(17, 18), HugeInt::build(19, 20)},
+      UUID());
+  auto dictionary = BaseVector::wrapInDictionary(
+      nullptr, makeIndices({2, 0, 1, 2}), 4, dictionaryBase);
+  serializer->append(makeRowVector({"u"}, {dictionary}), {0, 1, 0, 1});
+
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto r0 = deserialize(*ioBufs.at(0).first, type);
+  EXPECT_EQ(
+      sortedNullableValues<int128_t>(r0, 0),
+      (std::vector<std::optional<int128_t>>{
+          std::nullopt,
+          HugeInt::build(1, 2),
+          HugeInt::build(5, 6),
+          HugeInt::build(9, 10),
+          HugeInt::build(13, 14),
+          HugeInt::build(13, 14),
+          HugeInt::build(17, 18),
+          HugeInt::build(19, 20)}));
+
+  auto r1 = deserialize(*ioBufs.at(1).first, type);
+  EXPECT_EQ(
+      sortedNullableValues<int128_t>(r1, 0),
+      (std::vector<std::optional<int128_t>>{
+          std::nullopt,
+          HugeInt::build(3, 4),
+          HugeInt::build(7, 8),
+          HugeInt::build(11, 12),
+          HugeInt::build(13, 14),
+          HugeInt::build(15, 16),
+          HugeInt::build(19, 20)}));
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
     varbinaryMixedFlatConstantAcrossAppends) {
   auto type = ROW({"b"}, {VARBINARY()});
 
@@ -2011,13 +2154,10 @@ TEST_F(
   for (int col = 0; col < kNumCols; ++col) {
     names.push_back(fmt::format("c{}", col));
     // Rows where (row % 2 == 0) are null; the rest hold (row * kNumCols + col).
-    children.push_back(
-        makeFlatVector<int64_t>(
-            kNumRows,
-            [col](auto row) {
-              return static_cast<int64_t>(row * kNumCols + col);
-            },
-            [](auto row) { return (row % 2) == 0; }));
+    children.push_back(makeFlatVector<int64_t>(
+        kNumRows,
+        [col](auto row) { return static_cast<int64_t>(row * kNumCols + col); },
+        [](auto row) { return (row % 2) == 0; }));
   }
 
   auto input = makeRowVector(names, children);
