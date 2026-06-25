@@ -1017,6 +1017,29 @@ TEST_F(
   assertEqualVectors(canonicalize(expectedP1), canonicalize(p1));
 }
 
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    dictionaryScalarSinglePartitionFastPathRoundTrip) {
+  auto type = ROW({"v"}, {BIGINT()});
+
+  auto base = makeNullableFlatVector<int64_t>({10, std::nullopt, 30});
+  auto dictionary =
+      BaseVector::wrapInDictionary(nullptr, makeIndices({2, 1, 0}), 3, base);
+  auto input = makeRowVector({"v"}, {dictionary});
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(input, /*singlePartition=*/1);
+
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 1);
+  ASSERT_TRUE(ioBufs.count(1));
+
+  auto actual = deserialize(*ioBufs.at(1).first, type);
+  auto expected = makeRowVector(
+      {"v"}, {makeNullableFlatVector<int64_t>({30, std::nullopt, 10})});
+  assertEqualVectors(expected, actual);
+}
+
 TEST_F(PrestoIterativePartitioningSerializerTest, dictionaryRowInputRoundTrip) {
   auto nestedType = ROW({"a", "b"}, {INTEGER(), BIGINT()});
   auto type = ROW({"r"}, {nestedType});

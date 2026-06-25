@@ -684,10 +684,17 @@ void PartitionedDictionaryVector::partition(
     std::optional<uint32_t> singlePartition,
     PartitionBuildContext& ctx) {
   if (singlePartition.has_value()) {
-    if (const auto* rawNulls = vector_->rawNulls()) {
-      numNullsPerPartition_[singlePartition.value()] =
-          static_cast<vector_size_t>(
-              bits::countNulls(rawNulls, 0, vector_->size()));
+    if (vector_->mayHaveNulls()) {
+      auto nullCount = vector_->getNullCount();
+      if (nullCount.has_value()) {
+        numNullsPerPartition_[singlePartition.value()] = nullCount.value();
+        return;
+      }
+      vector_size_t numNulls = 0;
+      for (vector_size_t row = 0; row < vector_->size(); ++row) {
+        numNulls += vector_->isNullAt(row);
+      }
+      numNullsPerPartition_[singlePartition.value()] = numNulls;
     }
     return;
   }
