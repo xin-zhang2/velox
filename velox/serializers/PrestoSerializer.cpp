@@ -140,6 +140,18 @@ void PrestoVectorSerde::deserialize(
     RowVectorPtr* result,
     vector_size_t resultOffset,
     const Options* options) {
+  deserializeWithEncodingStats(
+      source, pool, type, result, resultOffset, options, nullptr);
+}
+
+void PrestoVectorSerde::deserializeWithEncodingStats(
+    ByteInputStream* source,
+    velox::memory::MemoryPool* pool,
+    RowTypePtr type,
+    RowVectorPtr* result,
+    vector_size_t resultOffset,
+    const Options* options,
+    DeserializeEncodingStats* deserializeEncodingStats) {
   const auto prestoOptions = toPrestoOptions(options);
   const auto codec =
       common::compressionKindToCodec(prestoOptions.compressionKind);
@@ -184,7 +196,14 @@ void PrestoVectorSerde::deserialize(
 
   if (!detail::isCompressedBitSet(header.pageCodecMarker)) {
     detail::readTopColumns(
-        *source, type, pool, *result, resultOffset, prestoOptions);
+        *source,
+        type,
+        pool,
+        *result,
+        resultOffset,
+        prestoOptions,
+        false,
+        deserializeEncodingStats);
   } else {
     auto compressBuf = folly::IOBuf::create(header.compressedSize);
     source->readBytes(compressBuf->writableData(), header.compressedSize);
@@ -196,7 +215,14 @@ void PrestoVectorSerde::deserialize(
     auto uncompressedSource = std::make_unique<BufferInputStream>(
         byteRangesFromIOBuf(uncompress.get()));
     detail::readTopColumns(
-        *uncompressedSource, type, pool, *result, resultOffset, prestoOptions);
+        *uncompressedSource,
+        type,
+        pool,
+        *result,
+        resultOffset,
+        prestoOptions,
+        false,
+        deserializeEncodingStats);
   }
 }
 

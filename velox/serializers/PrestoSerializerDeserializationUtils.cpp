@@ -21,6 +21,7 @@ namespace facebook::velox::serializer::presto::detail {
 namespace {
 using StructNullsMap =
     folly::F14FastMap<int64_t, std::pair<raw_vector<uint64_t>, int32_t>>;
+using DeserializeEncodingStats = PrestoVectorSerde::DeserializeEncodingStats;
 
 auto& structNullsMap() {
   thread_local std::unique_ptr<StructNullsMap> map;
@@ -60,6 +61,25 @@ bool hasNestedStructs(const std::vector<TypePtr>& types) {
     }
   }
   return false;
+}
+
+void recordDeserializeEncodingStats(
+    std::string_view encoding,
+    const TypePtr& type,
+    DeserializeEncodingStats* stats) {
+  if (stats == nullptr) {
+    return;
+  }
+
+  if (encoding == kRLE) {
+    ++stats->numConstantEncodings;
+  } else if (encoding == kDictionary) {
+    ++stats->numDictionaryEncodings;
+  } else if (encoding == typeToEncodingName(type)) {
+    ++stats->numFlatEncodings;
+  } else {
+    ++stats->numOtherEncodings;
+  }
 }
 
 // Reads nulls into 'scratch' and returns count of non-nulls. If 'copy' is
@@ -730,6 +750,7 @@ void read(
     int32_t numIncomingNulls,
     velox::memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions& opts,
+    DeserializeEncodingStats* /*deserializeEncodingStats*/,
     VectorPtr& result) {
   const int32_t size = source->read<int32_t>();
   const auto numNewValues = sizeWithIncomingNulls(size, numIncomingNulls);
@@ -812,6 +833,7 @@ void read<StringView>(
     int32_t numIncomingNulls,
     velox::memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions& opts,
+    DeserializeEncodingStats* /*deserializeEncodingStats*/,
     VectorPtr& result) {
   if (isIPPrefixType(type)) {
     return readIPPrefixValues(
@@ -866,6 +888,7 @@ void read<OpaqueType>(
     int32_t numIncomingNulls,
     memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions&,
+    DeserializeEncodingStats* /*deserializeEncodingStats*/,
     VectorPtr& result) {
   // Opaque values are serialized by first converting them to string
   // then serializing them as if they were string. The deserializable
@@ -923,6 +946,7 @@ void readColumns(
     int32_t numIncomingNulls,
     velox::memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions& opts,
+    DeserializeEncodingStats* deserializeEncodingStats,
     std::vector<VectorPtr>& result);
 
 void readArrayVector(
@@ -933,6 +957,7 @@ void readArrayVector(
     int32_t numIncomingNulls,
     velox::memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions& opts,
+    DeserializeEncodingStats* deserializeEncodingStats,
     VectorPtr& result) {
   ArrayVector* arrayVector = result->as<ArrayVector>();
 
@@ -948,6 +973,7 @@ void readArrayVector(
       0,
       pool,
       opts,
+      deserializeEncodingStats,
       children);
 
   const vector_size_t size = source->read<int32_t>();
@@ -989,6 +1015,7 @@ void readMapVector(
     int32_t numIncomingNulls,
     velox::memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions& opts,
+    DeserializeEncodingStats* deserializeEncodingStats,
     VectorPtr& result) {
   MapVector* mapVector = result->as<MapVector>();
   const auto resultElementsOffset = mapVector->mapKeys()->size();
@@ -1002,6 +1029,7 @@ void readMapVector(
       0,
       pool,
       opts,
+      deserializeEncodingStats,
       children);
 
   int32_t hashTableSize = source->read<int32_t>();
@@ -1045,6 +1073,7 @@ void readRowVector(
     int32_t numIncomingNulls,
     velox::memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions& opts,
+    DeserializeEncodingStats* deserializeEncodingStats,
     VectorPtr& result) {
   auto* row = result->asUnchecked<RowVector>();
   BufferPtr combinedNulls;
@@ -1101,6 +1130,7 @@ void readRowVector(
       numChildNulls,
       pool,
       opts,
+      deserializeEncodingStats,
       children);
   if (!opts.nullsFirst) {
     const auto size = source->read<int32_t>();
@@ -1122,12 +1152,22 @@ void readConstantVector(
     int32_t numIncomingNulls,
     velox::memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions& opts,
+    DeserializeEncodingStats* deserializeEncodingStats,
     VectorPtr& result) {
   const auto size = source->read<int32_t>();
   const int32_t numNewValues = sizeWithIncomingNulls(size, numIncomingNulls);
   std::vector<TypePtr> childTypes = {type};
   std::vector<VectorPtr> children{BaseVector::create(type, 0, pool)};
-  readColumns(source, childTypes, 0, nullptr, 0, pool, opts, children);
+  readColumns(
+      source,
+      childTypes,
+      0,
+      nullptr,
+      0,
+      pool,
+      opts,
+      deserializeEncodingStats,
+      children);
   VELOX_CHECK_EQ(1, children[0]->size());
 
   auto constantVector =
@@ -1171,13 +1211,23 @@ void readDictionaryVector(
     int32_t numIncomingNulls,
     velox::memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions& opts,
+    DeserializeEncodingStats* deserializeEncodingStats,
     VectorPtr& result) {
   const auto size = source->read<int32_t>();
   const int32_t numNewValues = sizeWithIncomingNulls(size, numIncomingNulls);
 
   std::vector<TypePtr> childTypes = {type};
   std::vector<VectorPtr> children{BaseVector::create(type, 0, pool)};
-  readColumns(source, childTypes, 0, nullptr, 0, pool, opts, children);
+  readColumns(
+      source,
+      childTypes,
+      0,
+      nullptr,
+      0,
+      pool,
+      opts,
+      deserializeEncodingStats,
+      children);
 
   // Read indices.
   BufferPtr indices = allocateIndices(numNewValues, pool);
@@ -1248,6 +1298,7 @@ bool tryReadNullColumn(
       numIncomingNulls,
       pool,
       opts,
+      nullptr,
       tempResult);
   auto deserializedSize = tempResult->size();
   // Ensure it contains all null values.
@@ -1279,6 +1330,7 @@ void readColumns(
     int32_t numIncomingNulls,
     velox::memory::MemoryPool* pool,
     const PrestoVectorSerde::PrestoOptions& opts,
+    DeserializeEncodingStats* deserializeEncodingStats,
     std::vector<VectorPtr>& results) {
   static const std::unordered_map<
       TypeKind,
@@ -1290,6 +1342,7 @@ void readColumns(
           int32_t numIncomingNulls,
           velox::memory::MemoryPool* pool,
           const PrestoVectorSerde::PrestoOptions& opts,
+          DeserializeEncodingStats* deserializeEncodingStats,
           VectorPtr& result)>>
       readers = {
           {TypeKind::BOOLEAN, &read<bool>},
@@ -1316,6 +1369,8 @@ void readColumns(
     auto& columnResult = results[i];
 
     const auto encoding = readLengthPrefixedString(source);
+    recordDeserializeEncodingStats(
+        encoding, columnType, deserializeEncodingStats);
     if (encoding == kRLE) {
       readConstantVector(
           source,
@@ -1325,6 +1380,7 @@ void readColumns(
           numIncomingNulls,
           pool,
           opts,
+          deserializeEncodingStats,
           columnResult);
     } else if (encoding == kDictionary) {
       readDictionaryVector(
@@ -1335,6 +1391,7 @@ void readColumns(
           numIncomingNulls,
           pool,
           opts,
+          deserializeEncodingStats,
           columnResult);
     } else {
       auto typeToEncoding = typeToEncodingName(columnType);
@@ -1378,6 +1435,7 @@ void readColumns(
           numIncomingNulls,
           pool,
           opts,
+          deserializeEncodingStats,
           columnResult);
     }
   }
@@ -1391,7 +1449,8 @@ void readTopColumns(
     const RowVectorPtr& result,
     int32_t resultOffset,
     const PrestoVectorSerde::PrestoOptions& opts,
-    bool singleColumn) {
+    bool singleColumn,
+    DeserializeEncodingStats* deserializeEncodingStats) {
   int32_t numColumns = 1;
   if (!singleColumn) {
     numColumns = source.read<int32_t>();
@@ -1425,6 +1484,14 @@ void readTopColumns(
     source.seekp(position);
   }
   readColumns(
-      &source, childTypes, resultOffset, nullptr, 0, pool, opts, children);
+      &source,
+      childTypes,
+      resultOffset,
+      nullptr,
+      0,
+      pool,
+      opts,
+      deserializeEncodingStats,
+      children);
 }
 } // namespace facebook::velox::serializer::presto::detail

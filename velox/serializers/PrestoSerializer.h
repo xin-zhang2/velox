@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 
 #include "velox/common/base/Crc.h"
@@ -48,6 +49,20 @@ namespace facebook::velox::serializer::presto {
 /// serializeSingleColumn() directly.
 class PrestoVectorSerde : public VectorSerde {
  public:
+  struct DeserializeEncodingStats {
+    int64_t numFlatEncodings{0};
+    int64_t numConstantEncodings{0};
+    int64_t numDictionaryEncodings{0};
+    int64_t numOtherEncodings{0};
+
+    void clear() {
+      numFlatEncodings = 0;
+      numConstantEncodings = 0;
+      numDictionaryEncodings = 0;
+      numOtherEncodings = 0;
+    }
+  };
+
   // Input options that the serializer recognizes.
   struct PrestoOptions : VectorSerde::Options {
     PrestoOptions() = default;
@@ -143,6 +158,15 @@ class PrestoVectorSerde : public VectorSerde {
       RowVectorPtr* result,
       vector_size_t resultOffset,
       const Options* options) override;
+
+  void deserializeWithEncodingStats(
+      ByteInputStream* source,
+      velox::memory::MemoryPool* pool,
+      RowTypePtr type,
+      RowVectorPtr* result,
+      vector_size_t resultOffset,
+      const Options* options,
+      DeserializeEncodingStats* deserializeEncodingStats);
 
   /// This function is used to deserialize a single column that is serialized in
   /// PrestoPage format. It is important to note that the PrestoPage format used

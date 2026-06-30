@@ -43,6 +43,15 @@ void RemoteConnectorSplit::registerSerDe() {
 }
 
 namespace {
+constexpr std::string_view kNumDeserializeFlatEncodings{
+    "numDeserializeFlatEncodings"};
+constexpr std::string_view kNumDeserializeConstantEncodings{
+    "numDeserializeConstantEncodings"};
+constexpr std::string_view kNumDeserializeDictionaryEncodings{
+    "numDeserializeDictionaryEncodings"};
+constexpr std::string_view kNumDeserializeOtherEncodings{
+    "numDeserializeOtherEncodings"};
+
 std::unique_ptr<folly::IOBuf> mergePages(
     std::vector<std::unique_ptr<SerializedPageBase>>& pages) {
   VELOX_CHECK(!pages.empty());
@@ -230,13 +239,25 @@ RowVectorPtr Exchange::getOutputFromColumnarPages(VectorSerde* serde) {
     // Inner loop: deserialize vectors from current page until batch is full
     // or page is exhausted.
     while (!inputStream_->atEnd() && resultOffset < numRows) {
-      serde->deserialize(
-          inputStream_.get(),
-          pool(),
-          outputType_,
-          &result_,
-          resultOffset,
-          serdeOptions_.get());
+      if (auto* prestoSerde =
+              dynamic_cast<serializer::presto::PrestoVectorSerde*>(serde)) {
+        prestoSerde->deserializeWithEncodingStats(
+            inputStream_.get(),
+            pool(),
+            outputType_,
+            &result_,
+            resultOffset,
+            serdeOptions_.get(),
+            &prestoDeserializeEncodingStats_);
+      } else {
+        serde->deserialize(
+            inputStream_.get(),
+            pool(),
+            outputType_,
+            &result_,
+            resultOffset,
+            serdeOptions_.get());
+      }
 
       resultOffset = result_->size();
     }
@@ -326,10 +347,27 @@ RowVectorPtr Exchange::getOutputFromRowPages(VectorSerde* serde) {
 }
 
 void Exchange::recordInputStats(uint64_t rawInputBytes) {
+  auto deserializeStats = prestoDeserializeEncodingStats_;
+  prestoDeserializeEncodingStats_.clear();
+
   auto lockedStats = stats_.wlock();
   lockedStats->rawInputBytes += rawInputBytes;
   lockedStats->rawInputPositions += result_->size();
   lockedStats->addInputVector(result_->estimateFlatSize(), result_->size());
+
+  lockedStats->addRuntimeStat(
+        kNumDeserializeFlatEncodings,
+        RuntimeCounter(deserializeStats.numFlatEncodings));
+  lockedStats->addRuntimeStat(
+        kNumDeserializeConstantEncodings,
+        RuntimeCounter(deserializeStats.numConstantEncodings));
+
+  lockedStats->addRuntimeStat(
+          kNumDeserializeDictionaryEncodings,
+          RuntimeCounter(deserializeStats.numDictionaryEncodings));
+  lockedStats->addRuntimeStat(
+        kNumDeserializeOtherEncodings,
+        RuntimeCounter(deserializeStats.numOtherEncodings));
 }
 
 void Exchange::close() {

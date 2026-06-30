@@ -40,5 +40,7 @@ void readTopColumns(
     const RowVectorPtr& result,
     int32_t resultOffset,
     const PrestoVectorSerde::PrestoOptions& opts,
-    bool singleColumn = false);
+    bool singleColumn = false,
+    PrestoVectorSerde::DeserializeEncodingStats* deserializeEncodingStats =
+        nullptr);
 } // namespace facebook::velox::serializer::presto::detail
