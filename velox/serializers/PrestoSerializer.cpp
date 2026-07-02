@@ -94,6 +94,25 @@ PrestoVectorSerde::PrestoOptions toPrestoOptions(
       "useLosslessTimestamp and useMicrosecondPrecision are mutually exclusive");
   return *prestoOptions;
 }
+
+uint64_t numMemoryAllocations(
+    memory::MemoryPool* pool,
+    const PrestoVectorSerde::DeserializeStats* stats) {
+  if (stats == nullptr) {
+    return 0;
+  }
+  return pool->stats().numAllocs;
+}
+
+int64_t numMemoryAllocationsSince(
+    uint64_t before,
+    memory::MemoryPool* pool,
+    const PrestoVectorSerde::DeserializeStats* stats) {
+  if (stats == nullptr) {
+    return 0;
+  }
+  return static_cast<int64_t>(pool->stats().numAllocs - before);
+}
 } // namespace
 
 void PrestoVectorSerde::estimateSerializedSize(
@@ -140,18 +159,22 @@ void PrestoVectorSerde::deserialize(
     RowVectorPtr* result,
     vector_size_t resultOffset,
     const Options* options) {
-  deserializeWithEncodingStats(
+  deserializeWithStats(
       source, pool, type, result, resultOffset, options, nullptr);
 }
 
-void PrestoVectorSerde::deserializeWithEncodingStats(
+void PrestoVectorSerde::deserializeWithStats(
     ByteInputStream* source,
     velox::memory::MemoryPool* pool,
     RowTypePtr type,
     RowVectorPtr* result,
     vector_size_t resultOffset,
     const Options* options,
-    DeserializeEncodingStats* deserializeEncodingStats) {
+    DeserializeStats* deserializeStats) {
+  using ResultBranch = DeserializeStats::ResultBranch;
+
+  const auto totalMemoryAllocationsBefore =
+      numMemoryAllocations(pool, deserializeStats);
   const auto prestoOptions = toPrestoOptions(options);
   const auto codec =
       common::compressionKindToCodec(prestoOptions.compressionKind);
@@ -175,11 +198,16 @@ void PrestoVectorSerde::deserializeWithEncodingStats(
   VELOX_CHECK_EQ(
       header.checksum, actualCheckSum, "Received corrupted serialized page.");
 
+  const auto resultMemoryAllocationsBefore =
+      numMemoryAllocations(pool, deserializeStats);
+  ResultBranch resultBranch;
   if (resultOffset > 0) {
+    resultBranch = ResultBranch::kAppend;
     VELOX_CHECK_NOT_NULL(*result);
     VELOX_CHECK_EQ(result->use_count(), 1);
     (*result)->resize(resultOffset + header.numRows);
   } else if (*result && result->use_count() == 1) {
+    resultBranch = ResultBranch::kReuse;
     VELOX_CHECK(
         *(*result)->type() == *type,
         "Unexpected type: {} vs. {}",
@@ -188,22 +216,41 @@ void PrestoVectorSerde::deserializeWithEncodingStats(
     (*result)->prepareForReuse();
     (*result)->resize(header.numRows);
   } else {
+    resultBranch = ResultBranch::kCreate;
     *result = BaseVector::create<RowVector>(type, header.numRows, pool);
+  }
+  if (deserializeStats != nullptr) {
+    deserializeStats->recordResultBranch(
+        resultBranch,
+        numMemoryAllocationsSince(
+            resultMemoryAllocationsBefore, pool, deserializeStats));
   }
 
   VELOX_CHECK_EQ(
       header.checksum, actualCheckSum, "Received corrupted serialized page.");
 
-  if (!detail::isCompressedBitSet(header.pageCodecMarker)) {
+  auto readTopColumns = [&](ByteInputStream& columnSource) {
+    const auto readTopColumnsMemoryAllocationsBefore =
+        numMemoryAllocations(pool, deserializeStats);
     detail::readTopColumns(
-        *source,
+        columnSource,
         type,
         pool,
         *result,
         resultOffset,
         prestoOptions,
         false,
-        deserializeEncodingStats);
+        deserializeStats);
+    if (deserializeStats != nullptr) {
+      deserializeStats->recordReadTopColumnsMemoryAllocations(
+          resultBranch,
+          numMemoryAllocationsSince(
+              readTopColumnsMemoryAllocationsBefore, pool, deserializeStats));
+    }
+  };
+
+  if (!detail::isCompressedBitSet(header.pageCodecMarker)) {
+    readTopColumns(*source);
   } else {
     auto compressBuf = folly::IOBuf::create(header.compressedSize);
     source->readBytes(compressBuf->writableData(), header.compressedSize);
@@ -214,15 +261,13 @@ void PrestoVectorSerde::deserializeWithEncodingStats(
         codec->uncompress(compressBuf.get(), header.uncompressedSize);
     auto uncompressedSource = std::make_unique<BufferInputStream>(
         byteRangesFromIOBuf(uncompress.get()));
-    detail::readTopColumns(
-        *uncompressedSource,
-        type,
-        pool,
-        *result,
-        resultOffset,
-        prestoOptions,
-        false,
-        deserializeEncodingStats);
+    readTopColumns(*uncompressedSource);
+  }
+
+  if (deserializeStats != nullptr) {
+    deserializeStats->numDeserializeTotalMemoryAllocations +=
+        numMemoryAllocationsSince(
+            totalMemoryAllocationsBefore, pool, deserializeStats);
   }
 }
 

@@ -51,6 +51,26 @@ constexpr std::string_view kNumDeserializeDictionaryEncodings{
     "numDeserializeDictionaryEncodings"};
 constexpr std::string_view kNumDeserializeOtherEncodings{
     "numDeserializeOtherEncodings"};
+constexpr std::string_view kNumDeserializeAppendResultBranches{
+    "numDeserializeAppendResultBranches"};
+constexpr std::string_view kNumDeserializeReuseResultBranches{
+    "numDeserializeReuseResultBranches"};
+constexpr std::string_view kNumDeserializeCreateResultBranches{
+    "numDeserializeCreateResultBranches"};
+constexpr std::string_view kNumDeserializeAppendResultMemoryAllocations{
+    "numDeserializeAppendResultMemoryAllocations"};
+constexpr std::string_view kNumDeserializeReuseResultMemoryAllocations{
+    "numDeserializeReuseResultMemoryAllocations"};
+constexpr std::string_view kNumDeserializeCreateResultMemoryAllocations{
+    "numDeserializeCreateResultMemoryAllocations"};
+constexpr std::string_view kNumDeserializeAppendReadTopColumnsMemoryAllocations{
+    "numDeserializeAppendReadTopColumnsMemoryAllocations"};
+constexpr std::string_view kNumDeserializeReuseReadTopColumnsMemoryAllocations{
+    "numDeserializeReuseReadTopColumnsMemoryAllocations"};
+constexpr std::string_view kNumDeserializeCreateReadTopColumnsMemoryAllocations{
+    "numDeserializeCreateReadTopColumnsMemoryAllocations"};
+constexpr std::string_view kNumDeserializeTotalMemoryAllocations{
+    "numDeserializeTotalMemoryAllocations"};
 
 std::unique_ptr<folly::IOBuf> mergePages(
     std::vector<std::unique_ptr<SerializedPageBase>>& pages) {
@@ -241,14 +261,14 @@ RowVectorPtr Exchange::getOutputFromColumnarPages(VectorSerde* serde) {
     while (!inputStream_->atEnd() && resultOffset < numRows) {
       if (auto* prestoSerde =
               dynamic_cast<serializer::presto::PrestoVectorSerde*>(serde)) {
-        prestoSerde->deserializeWithEncodingStats(
+        prestoSerde->deserializeWithStats(
             inputStream_.get(),
             pool(),
             outputType_,
             &result_,
             resultOffset,
             serdeOptions_.get(),
-            &prestoDeserializeEncodingStats_);
+            &prestoDeserializeStats_);
       } else {
         serde->deserialize(
             inputStream_.get(),
@@ -347,8 +367,8 @@ RowVectorPtr Exchange::getOutputFromRowPages(VectorSerde* serde) {
 }
 
 void Exchange::recordInputStats(uint64_t rawInputBytes) {
-  auto deserializeStats = prestoDeserializeEncodingStats_;
-  prestoDeserializeEncodingStats_.clear();
+  auto deserializeStats = prestoDeserializeStats_;
+  prestoDeserializeStats_.clear();
 
   auto lockedStats = stats_.wlock();
   lockedStats->rawInputBytes += rawInputBytes;
@@ -356,18 +376,50 @@ void Exchange::recordInputStats(uint64_t rawInputBytes) {
   lockedStats->addInputVector(result_->estimateFlatSize(), result_->size());
 
   lockedStats->addRuntimeStat(
-        kNumDeserializeFlatEncodings,
-        RuntimeCounter(deserializeStats.numFlatEncodings));
+      kNumDeserializeFlatEncodings,
+      RuntimeCounter(deserializeStats.numFlatEncodings));
   lockedStats->addRuntimeStat(
-        kNumDeserializeConstantEncodings,
-        RuntimeCounter(deserializeStats.numConstantEncodings));
+      kNumDeserializeConstantEncodings,
+      RuntimeCounter(deserializeStats.numConstantEncodings));
 
   lockedStats->addRuntimeStat(
-          kNumDeserializeDictionaryEncodings,
-          RuntimeCounter(deserializeStats.numDictionaryEncodings));
+      kNumDeserializeDictionaryEncodings,
+      RuntimeCounter(deserializeStats.numDictionaryEncodings));
   lockedStats->addRuntimeStat(
-        kNumDeserializeOtherEncodings,
-        RuntimeCounter(deserializeStats.numOtherEncodings));
+      kNumDeserializeOtherEncodings,
+      RuntimeCounter(deserializeStats.numOtherEncodings));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeAppendResultBranches,
+      RuntimeCounter(deserializeStats.numAppendResultBranches));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeReuseResultBranches,
+      RuntimeCounter(deserializeStats.numReuseResultBranches));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeCreateResultBranches,
+      RuntimeCounter(deserializeStats.numCreateResultBranches));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeAppendResultMemoryAllocations,
+      RuntimeCounter(deserializeStats.numAppendResultMemoryAllocations));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeReuseResultMemoryAllocations,
+      RuntimeCounter(deserializeStats.numReuseResultMemoryAllocations));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeCreateResultMemoryAllocations,
+      RuntimeCounter(deserializeStats.numCreateResultMemoryAllocations));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeAppendReadTopColumnsMemoryAllocations,
+      RuntimeCounter(
+          deserializeStats.numAppendReadTopColumnsMemoryAllocations));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeReuseReadTopColumnsMemoryAllocations,
+      RuntimeCounter(deserializeStats.numReuseReadTopColumnsMemoryAllocations));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeCreateReadTopColumnsMemoryAllocations,
+      RuntimeCounter(
+          deserializeStats.numCreateReadTopColumnsMemoryAllocations));
+  lockedStats->addRuntimeStat(
+      kNumDeserializeTotalMemoryAllocations,
+      RuntimeCounter(deserializeStats.numDeserializeTotalMemoryAllocations));
 }
 
 void Exchange::close() {

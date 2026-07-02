@@ -76,8 +76,9 @@ OptimizedPartitionedOutput::OptimizedPartitionedOutput(
   std::function<std::unique_ptr<OutputStreamListener>()> listenerFactory =
       nullptr;
   if (operatorCtx_->driverCtx()->queryConfig().isExchangeChecksumEnabled()) {
-    listenerFactory = [bufferManager = bufferManager_]()
-        -> std::unique_ptr<OutputStreamListener> {
+    listenerFactory =
+        [bufferManager =
+             bufferManager_]() -> std::unique_ptr<OutputStreamListener> {
       auto lockedBufferManager = bufferManager.lock();
       VELOX_CHECK_NOT_NULL(
           lockedBufferManager, "OutputBufferManager was already destructed");
@@ -102,9 +103,10 @@ void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
 
   auto serializerInput = prepareSerializerInput(input);
 
-  if (serializer_->maxRowsBufferedPerPartition() >= kMaxRowsPerDestinationBeforeFlush ||
-    serializer_->estimateBytesAfterAppend(serializerInput) >
-      maxOutputBufferBytes_) {
+  if (serializer_->maxRowsBufferedPerPartition() >=
+          kMaxRowsPerDestinationBeforeFlush ||
+      serializer_->estimateBytesAfterAppend(serializerInput) >
+          maxOutputBufferBytes_) {
     flush();
   }
 
@@ -135,7 +137,8 @@ RowVectorPtr OptimizedPartitionedOutput::getOutput() {
   blockingReason_ = BlockingReason::kNotBlocked;
 
   if (noMoreInput_ || serializer_->bytesBuffered() >= maxOutputBufferBytes_ ||
-    serializer_->maxRowsBufferedPerPartition() >= kMaxRowsPerDestinationBeforeFlush) {
+      serializer_->maxRowsBufferedPerPartition() >=
+          kMaxRowsPerDestinationBeforeFlush) {
     flush();
   }
 
@@ -242,6 +245,7 @@ void OptimizedPartitionedOutput::flush() {
   // This will serialize all destinations and reset serializer_->bytesBuffered()
   // to 0.
   auto serializedIOBufs = serializer_->flush();
+  const auto numSerializedPages = serializedIOBufs.size();
   auto bufferManager = bufferManager_.lock();
   VELOX_CHECK_NOT_NULL(
       bufferManager, "OutputBufferManager was already destructed");
@@ -276,6 +280,11 @@ void OptimizedPartitionedOutput::flush() {
 
   auto lockedStats = stats_.wlock();
   lockedStats->addOutputVector(flushedBytes, flushedRows);
+  if (numSerializedPages > 0) {
+    lockedStats->addRuntimeStat(
+        "numSerializedPages",
+        RuntimeCounter(static_cast<int64_t>(numSerializedPages)));
+  }
   if (flushedRows > 0) {
     ++numFlushes_;
     lockedStats->addRuntimeStat("numFlushes", RuntimeCounter(1));

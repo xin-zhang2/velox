@@ -101,8 +101,8 @@ class Exchange : public SourceOperator {
 
   const std::unique_ptr<VectorSerde::Options> serdeOptions_;
 
-  serializer::presto::PrestoVectorSerde::DeserializeEncodingStats
-      prestoDeserializeEncodingStats_;
+  serializer::presto::PrestoVectorSerde::DeserializeStats
+      prestoDeserializeStats_;
 
   /// True if this operator is responsible for fetching splits from the Task
   /// and passing these to ExchangeClient.

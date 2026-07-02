@@ -49,17 +49,67 @@ namespace facebook::velox::serializer::presto {
 /// serializeSingleColumn() directly.
 class PrestoVectorSerde : public VectorSerde {
  public:
-  struct DeserializeEncodingStats {
+  struct DeserializeStats {
+    enum class ResultBranch {
+      kAppend,
+      kReuse,
+      kCreate,
+    };
+
     int64_t numFlatEncodings{0};
     int64_t numConstantEncodings{0};
     int64_t numDictionaryEncodings{0};
     int64_t numOtherEncodings{0};
 
+    int64_t numAppendResultBranches{0};
+    int64_t numReuseResultBranches{0};
+    int64_t numCreateResultBranches{0};
+
+    int64_t numAppendResultMemoryAllocations{0};
+    int64_t numReuseResultMemoryAllocations{0};
+    int64_t numCreateResultMemoryAllocations{0};
+
+    int64_t numAppendReadTopColumnsMemoryAllocations{0};
+    int64_t numReuseReadTopColumnsMemoryAllocations{0};
+    int64_t numCreateReadTopColumnsMemoryAllocations{0};
+
+    int64_t numDeserializeTotalMemoryAllocations{0};
+
+    void recordResultBranch(ResultBranch branch, int64_t numMemoryAllocations) {
+      switch (branch) {
+        case ResultBranch::kAppend:
+          ++numAppendResultBranches;
+          numAppendResultMemoryAllocations += numMemoryAllocations;
+          return;
+        case ResultBranch::kReuse:
+          ++numReuseResultBranches;
+          numReuseResultMemoryAllocations += numMemoryAllocations;
+          return;
+        case ResultBranch::kCreate:
+          ++numCreateResultBranches;
+          numCreateResultMemoryAllocations += numMemoryAllocations;
+          return;
+      }
+    }
+
+    void recordReadTopColumnsMemoryAllocations(
+        ResultBranch branch,
+        int64_t numMemoryAllocations) {
+      switch (branch) {
+        case ResultBranch::kAppend:
+          numAppendReadTopColumnsMemoryAllocations += numMemoryAllocations;
+          return;
+        case ResultBranch::kReuse:
+          numReuseReadTopColumnsMemoryAllocations += numMemoryAllocations;
+          return;
+        case ResultBranch::kCreate:
+          numCreateReadTopColumnsMemoryAllocations += numMemoryAllocations;
+          return;
+      }
+    }
+
     void clear() {
-      numFlatEncodings = 0;
-      numConstantEncodings = 0;
-      numDictionaryEncodings = 0;
-      numOtherEncodings = 0;
+      *this = DeserializeStats{};
     }
   };
 
@@ -159,14 +209,14 @@ class PrestoVectorSerde : public VectorSerde {
       vector_size_t resultOffset,
       const Options* options) override;
 
-  void deserializeWithEncodingStats(
+  void deserializeWithStats(
       ByteInputStream* source,
       velox::memory::MemoryPool* pool,
       RowTypePtr type,
       RowVectorPtr* result,
       vector_size_t resultOffset,
       const Options* options,
-      DeserializeEncodingStats* deserializeEncodingStats);
+      DeserializeStats* deserializeStats);
 
   /// This function is used to deserialize a single column that is serialized in
   /// PrestoPage format. It is important to note that the PrestoPage format used
