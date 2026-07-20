@@ -102,6 +102,8 @@ void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
 
   auto serializerInput = prepareSerializerInput(input);
 
+  recordSerializerInputEncodings(serializerInput);
+
   if (serializer_->maxRowsBufferedPerPartition() >= kMaxRowsPerDestinationBeforeFlush ||
     serializer_->estimateBytesAfterAppend(serializerInput) >
       maxOutputBufferBytes_) {
@@ -151,6 +153,18 @@ RowVectorPtr OptimizedPartitionedOutput::getOutput() {
     // PrestoIterativePartitioningSerializer exposes runtimeStats().
     bufferManager_.lock()->noMoreData(operatorCtx_->task()->taskId());
     finished_ = true;
+
+    auto lockedStats = stats_.wlock();
+    lockedStats->addRuntimeStat("numFlatVectors", RuntimeCounter(inputEncodingStats_.numFlatVectors));
+    lockedStats->addRuntimeStat("numFlatRows", RuntimeCounter(inputEncodingStats_.numFlatRows));
+    lockedStats->addRuntimeStat("numConstantVectors", RuntimeCounter(inputEncodingStats_.numConstantVectors));
+    lockedStats->addRuntimeStat("numConstantRows", RuntimeCounter(inputEncodingStats_.numConstantRows));
+    lockedStats->addRuntimeStat("numDictVectors", RuntimeCounter(inputEncodingStats_.numDictVectors));
+    lockedStats->addRuntimeStat("numDictRows", RuntimeCounter(inputEncodingStats_.numDictRows));
+    lockedStats->addRuntimeStat("numOtherVectors", RuntimeCounter(inputEncodingStats_.numOtherVectors));
+    lockedStats->addRuntimeStat("numOtherRows", RuntimeCounter(inputEncodingStats_.numOtherRows));
+    lockedStats->addRuntimeStat("numDictDistinctBaseVectors", RuntimeCounter(inputEncodingStats_.numDictDistinctBaseVectors));
+    lockedStats->addRuntimeStat("numDictBaseRows", RuntimeCounter(inputEncodingStats_.numDictBaseRows));
   }
 
   return nullptr;
@@ -283,6 +297,42 @@ void OptimizedPartitionedOutput::flush() {
   if (shouldBlock) {
     ++numBlockedTimes_;
     lockedStats->addRuntimeStat("numBlockedTimes", RuntimeCounter(1));
+  }
+}
+
+void OptimizedPartitionedOutput::recordSerializerInputEncodings(
+    const RowVectorPtr& input) {
+  std::unordered_set<const BaseVector*> distinctBaseVectors;
+  for (column_index_t outputColumn = 0; outputColumn < outputType_->size(); ++outputColumn) {
+    const auto inputColumn = serializerInputByOutput_.empty()
+        ? outputColumn
+        : serializerInputByOutput_[outputColumn];
+    const auto& child = input->childAt(inputColumn);
+    VELOX_CHECK_NOT_NULL(child);
+    switch (child->encoding()) {
+      case VectorEncoding::Simple::FLAT:
+        ++inputEncodingStats_.numFlatVectors;
+        inputEncodingStats_.numFlatRows += input->size();
+        break;
+      case VectorEncoding::Simple::CONSTANT:
+        ++inputEncodingStats_.numConstantVectors;
+        inputEncodingStats_.numConstantRows += input->size();
+        break;
+      case VectorEncoding::Simple::DICTIONARY: {
+        ++inputEncodingStats_.numDictVectors;
+        inputEncodingStats_.numDictRows += input->size();
+        const auto& base = child->valueVector();
+        VELOX_DCHECK_NOT_NULL(base);
+        if (distinctBaseVectors.insert(base.get()).second) {
+          ++inputEncodingStats_.numDictDistinctBaseVectors;
+          inputEncodingStats_.numDictBaseRows += base->size();
+        }
+        break;
+      }
+      default:
+        ++inputEncodingStats_.numOtherVectors;
+        inputEncodingStats_.numOtherRows += child->size();
+    }
   }
 }
 

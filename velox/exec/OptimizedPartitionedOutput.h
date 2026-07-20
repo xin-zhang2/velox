@@ -65,6 +65,8 @@ class OptimizedPartitionedOutput : public Operator {
   /// leaves duplication to flush time.
   RowVectorPtr prepareSerializerInput(const RowVectorPtr& input) const;
 
+  void recordSerializerInputEncodings(const RowVectorPtr& input);
+
   /// Serializes all buffered rows into Presto pages and enqueues each page
   /// into the output buffer manager. All destinations are always enqueued;
   /// sets blockingReason_ and records a future if the output buffer is full.
@@ -117,6 +119,21 @@ class OptimizedPartitionedOutput : public Operator {
   /// Counts flush() calls that caused the driver to block on a full output
   /// buffer. Exposed as the "numBlockedTimes" runtime stat.
   uint64_t numBlockedTimes_{0};
+
+  struct InputEncodingStats {
+    uint64_t numFlatVectors{0};
+    uint64_t numFlatRows{0};
+    uint64_t numConstantVectors{0};
+    uint64_t numConstantRows{0};
+    uint64_t numDictVectors{0};
+    uint64_t numDictRows{0};
+    uint64_t numOtherVectors{0};
+    uint64_t numOtherRows{0};
+    uint64_t numDictDistinctBaseVectors{0};
+    uint64_t numDictBaseRows{0};
+  };
+
+  InputEncodingStats inputEncodingStats_;
 };
 
 } // namespace facebook::velox::exec
