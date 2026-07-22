@@ -33,6 +33,7 @@ TEST_F(QueryConfigTest, emptyConfig) {
   const QueryConfig& config = queryCtx->queryConfig();
 
   ASSERT_FALSE(config.isLegacyCast());
+  EXPECT_FALSE(config.optimizedPartitionedOutputInputEncodingStatsEnabled());
   EXPECT_EQ(config.maxNumSplitsListenedTo(), 0);
 }
 
@@ -51,11 +52,13 @@ TEST_F(QueryConfigTest, setConfig) {
 TEST_F(QueryConfigTest, optimizedPartitioningConfigs) {
   std::unordered_map<std::string, std::string> configData(
       {{"optimized_partitioned_output_enabled", "true"},
+       {"optimized_partitioned_output_input_encoding_stats_enabled", "true"},
        {"optimized_hash_partition_function_enabled", "true"}});
   auto queryCtx = QueryCtx::create(nullptr, QueryConfig{std::move(configData)});
   const QueryConfig& config = queryCtx->queryConfig();
 
   EXPECT_TRUE(config.optimizedPartitionedOutputEnabled());
+  EXPECT_TRUE(config.optimizedPartitionedOutputInputEncodingStatsEnabled());
   EXPECT_TRUE(config.optimizedHashPartitionFunctionEnabled());
 }
 

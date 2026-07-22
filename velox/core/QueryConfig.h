@@ -1416,6 +1416,14 @@ class QueryConfig {
       false,
       "Enable OptimizedPartitionedOutput operator.");
 
+  VELOX_QUERY_CONFIG(
+      kOptimizedPartitionedOutputInputEncodingStatsEnabled,
+      optimizedPartitionedOutputInputEncodingStatsEnabled,
+      "optimized_partitioned_output_input_encoding_stats_enabled",
+      bool,
+      false,
+      "Collect input vector encoding stats for OptimizedPartitionedOutput.");
+
   static constexpr const char* kExchangeChecksum = "exchange_checksum";
 
   // --- Hand-written accessors for properties that need custom logic ---

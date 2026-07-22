@@ -1160,4 +1160,76 @@ TEST_F(OptimizedPartitionedOutputTest, duplicateOutputColumns) {
   }
 }
 
+TEST_F(
+    OptimizedPartitionedOutputTest,
+    inputEncodingStatsDeduplicateBaseAcrossBatches) {
+  auto base = makeFlatVector<int64_t>({10, 20, 30, 40});
+  auto makeBatch = [&](vector_size_t offset) {
+    auto indices =
+        makeIndices(8, [&](auto row) { return (row + offset) % base->size(); });
+    return makeRowVector(
+        {"v"}, {BaseVector::wrapInDictionary(nullptr, indices, 8, base)});
+  };
+
+  auto result = runPartitionedOutput(
+      "local://test-optimized-output-input-encoding-stats",
+      {makeBatch(0), makeBatch(1)},
+      {},
+      1,
+      {{core::QueryConfig::
+            kOptimizedPartitionedOutputInputEncodingStatsEnabled,
+        "true"}});
+
+  EXPECT_EQ(getIntRuntimeStat(result.task.get(), "numDictVectors"), 2);
+  EXPECT_EQ(getIntRuntimeStat(result.task.get(), "numDictRows"), 16);
+  EXPECT_EQ(
+      getIntRuntimeStat(result.task.get(), "numDictDistinctBaseVectors"), 1);
+  EXPECT_EQ(getIntRuntimeStat(result.task.get(), "numDictBaseRows"), 4);
+}
+
+TEST_F(
+    OptimizedPartitionedOutputTest,
+    inputEncodingStatsDisabledByDefault) {
+  auto input = makeRowVector(
+      {"v"}, {makeFlatVector<int64_t>({10, 20, 30, 40})});
+  auto result = runPartitionedOutput(
+      "local://test-optimized-output-input-encoding-stats-disabled",
+      {input},
+      {},
+      1);
+
+  const auto taskStats = result.task->taskStats();
+  const auto& runtimeStats =
+      taskStats.pipelineStats[0].operatorStats.back().runtimeStats;
+  EXPECT_EQ(runtimeStats.count("numFlatVectors"), 0);
+  EXPECT_EQ(runtimeStats.count("numDictDistinctBaseVectors"), 0);
+}
+
+TEST_F(
+    OptimizedPartitionedOutputTest,
+    sharedInputEncodingStatsDeduplicateConcurrentOperators) {
+  auto baseA = makeFlatVector<int64_t>({1, 2, 3});
+  auto baseB = makeFlatVector<int64_t>({4, 5});
+
+  OptimizedPartitionedOutputSharedState::DistinctBaseVectors firstOperator;
+  firstOperator.try_emplace(baseA, baseA->size());
+  firstOperator.try_emplace(baseB, baseB->size());
+
+  OptimizedPartitionedOutputSharedState::DistinctBaseVectors secondOperator;
+  secondOperator.try_emplace(baseA, baseA->size());
+
+  OptimizedPartitionedOutputSharedState sharedState;
+  auto first = std::async(
+      std::launch::async, [&] { return sharedState.merge(firstOperator); });
+  auto second = std::async(
+      std::launch::async, [&] { return sharedState.merge(secondOperator); });
+
+  const auto firstResult = first.get();
+  const auto secondResult = second.get();
+  EXPECT_EQ(
+      firstResult.numDistinctBaseVectors + secondResult.numDistinctBaseVectors,
+      2);
+  EXPECT_EQ(firstResult.numBaseRows + secondResult.numBaseRows, 5);
+}
+
 } // namespace facebook::velox::exec::test

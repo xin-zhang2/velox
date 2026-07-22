@@ -366,6 +366,11 @@ void LocalPlanner::plan(
 
   // Determine number of drivers for each pipeline.
   for (auto& factory : *driverFactories) {
+    if (queryConfig.optimizedPartitionedOutputEnabled() &&
+        factory->needsPartitionedOutput()) {
+      factory->optimizedPartitionedOutputSharedState =
+          std::make_shared<OptimizedPartitionedOutputSharedState>();
+    }
     factory->maxDrivers = detail::maxDrivers(*factory, queryConfig);
     factory->numDrivers = std::min(factory->maxDrivers, maxDrivers);
 
@@ -554,10 +559,13 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
         auto partitionedOutputNode =
             std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
                 planNode)) {
-      if (ctx->queryConfig().optimizedPartitionedOutputEnabled() && !partitionedOutputNode->isReplicateNullsAndAny()) {
-        operators.push_back(
-            std::make_unique<OptimizedPartitionedOutput>(
-                id, ctx.get(), partitionedOutputNode));
+      if (ctx->queryConfig().optimizedPartitionedOutputEnabled() &&
+          !partitionedOutputNode->isReplicateNullsAndAny()) {
+        operators.push_back(std::make_unique<OptimizedPartitionedOutput>(
+            id,
+            ctx.get(),
+            partitionedOutputNode,
+            optimizedPartitionedOutputSharedState));
       } else {
         operators.push_back(
             std::make_unique<PartitionedOutput>(

@@ -16,11 +16,32 @@
 
 #pragma once
 
+#include <map>
+
 #include "velox/exec/Operator.h"
 #include "velox/exec/OutputBufferManager.h"
 #include "velox/serializers/PrestoIterativePartitioningSerializer.h"
 
 namespace facebook::velox::exec {
+
+/// Shared by all OptimizedPartitionedOutput operators in a driver factory.
+/// Weak pointers preserve vector identity without retaining vector data.
+class OptimizedPartitionedOutputSharedState {
+ public:
+  using BaseVectorRef = std::weak_ptr<BaseVector>;
+  using DistinctBaseVectors =
+      std::map<BaseVectorRef, vector_size_t, std::owner_less<BaseVectorRef>>;
+
+  struct MergeResult {
+    uint64_t numDistinctBaseVectors{0};
+    uint64_t numBaseRows{0};
+  };
+
+  MergeResult merge(const DistinctBaseVectors& localDistinctBaseVectors);
+
+ private:
+  folly::Synchronized<DistinctBaseVectors> distinctBaseVectors_;
+};
 
 /// Partitioned output operator backed by PrestoIterativePartitioningSerializer.
 ///
@@ -37,7 +58,8 @@ class OptimizedPartitionedOutput : public Operator {
   OptimizedPartitionedOutput(
       int32_t operatorId,
       DriverCtx* ctx,
-      const std::shared_ptr<const core::PartitionedOutputNode>& planNode);
+      const std::shared_ptr<const core::PartitionedOutputNode>& planNode,
+      std::shared_ptr<OptimizedPartitionedOutputSharedState> sharedState);
 
   void addInput(RowVectorPtr input) override;
 
@@ -67,6 +89,8 @@ class OptimizedPartitionedOutput : public Operator {
 
   void recordSerializerInputEncodings(const RowVectorPtr& input);
 
+  void mergeSerializerInputEncodingStats();
+
   /// Serializes all buffered rows into Presto pages and enqueues each page
   /// into the output buffer manager. All destinations are always enqueued;
   /// sets blockingReason_ and records a future if the output buffer is full.
@@ -86,6 +110,8 @@ class OptimizedPartitionedOutput : public Operator {
   /// while serialized pages are in flight inside the buffer manager.
   const std::function<void()> bufferReleaseFn_;
   const int64_t maxOutputBufferBytes_;
+  const bool recordInputEncodingStats_;
+  const std::shared_ptr<OptimizedPartitionedOutputSharedState> sharedState_;
 
   velox::memory::MemoryPool* pool_;
 
@@ -134,6 +160,8 @@ class OptimizedPartitionedOutput : public Operator {
   };
 
   InputEncodingStats inputEncodingStats_;
+  OptimizedPartitionedOutputSharedState::DistinctBaseVectors
+      localDistinctBaseVectors_;
 };
 
 } // namespace facebook::velox::exec

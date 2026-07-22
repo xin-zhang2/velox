@@ -24,10 +24,25 @@
 
 namespace facebook::velox::exec {
 
+OptimizedPartitionedOutputSharedState::MergeResult
+OptimizedPartitionedOutputSharedState::merge(
+    const DistinctBaseVectors& localDistinctBaseVectors) {
+  MergeResult result;
+  auto distinctBaseVectors = distinctBaseVectors_.wlock();
+  for (const auto& [base, rows] : localDistinctBaseVectors) {
+    if (distinctBaseVectors->try_emplace(base, rows).second) {
+      ++result.numDistinctBaseVectors;
+      result.numBaseRows += rows;
+    }
+  }
+  return result;
+}
+
 OptimizedPartitionedOutput::OptimizedPartitionedOutput(
     int32_t operatorId,
     DriverCtx* ctx,
-    const std::shared_ptr<const core::PartitionedOutputNode>& planNode)
+    const std::shared_ptr<const core::PartitionedOutputNode>& planNode,
+    std::shared_ptr<OptimizedPartitionedOutputSharedState> sharedState)
     : Operator(
           ctx,
           planNode->outputType(),
@@ -52,6 +67,10 @@ OptimizedPartitionedOutput::OptimizedPartitionedOutput(
       maxOutputBufferBytes_(ctx->task->queryCtx()
                                 ->queryConfig()
                                 .maxPartitionedOutputBufferSize()),
+      recordInputEncodingStats_(
+          ctx->queryConfig()
+              .optimizedPartitionedOutputInputEncodingStatsEnabled()),
+      sharedState_(std::move(sharedState)),
       pool_(pool()),
       partitionFunction_(
           numDestinations_ == 1 ? nullptr
@@ -62,6 +81,7 @@ OptimizedPartitionedOutput::OptimizedPartitionedOutput(
   if (!planNode->isPartitioned()) {
     VELOX_USER_CHECK_EQ(numDestinations_, 1);
   }
+  VELOX_CHECK_NOT_NULL(sharedState_);
   if (numDestinations_ == 1) {
     VELOX_USER_CHECK(keyChannels_.empty());
   }
@@ -102,7 +122,9 @@ void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
 
   auto serializerInput = prepareSerializerInput(input);
 
-  recordSerializerInputEncodings(serializerInput);
+  if (recordInputEncodingStats_) {
+    recordSerializerInputEncodings(serializerInput);
+  }
 
   if (serializer_->maxRowsBufferedPerPartition() >= kMaxRowsPerDestinationBeforeFlush ||
     serializer_->estimateBytesAfterAppend(serializerInput) >
@@ -154,17 +176,23 @@ RowVectorPtr OptimizedPartitionedOutput::getOutput() {
     bufferManager_.lock()->noMoreData(operatorCtx_->task()->taskId());
     finished_ = true;
 
+    if (recordInputEncodingStats_) {
+      mergeSerializerInputEncodingStats();
+    }
+
     auto lockedStats = stats_.wlock();
-    lockedStats->addRuntimeStat("numFlatVectors", RuntimeCounter(inputEncodingStats_.numFlatVectors));
-    lockedStats->addRuntimeStat("numFlatRows", RuntimeCounter(inputEncodingStats_.numFlatRows));
-    lockedStats->addRuntimeStat("numConstantVectors", RuntimeCounter(inputEncodingStats_.numConstantVectors));
-    lockedStats->addRuntimeStat("numConstantRows", RuntimeCounter(inputEncodingStats_.numConstantRows));
-    lockedStats->addRuntimeStat("numDictVectors", RuntimeCounter(inputEncodingStats_.numDictVectors));
-    lockedStats->addRuntimeStat("numDictRows", RuntimeCounter(inputEncodingStats_.numDictRows));
-    lockedStats->addRuntimeStat("numOtherVectors", RuntimeCounter(inputEncodingStats_.numOtherVectors));
-    lockedStats->addRuntimeStat("numOtherRows", RuntimeCounter(inputEncodingStats_.numOtherRows));
-    lockedStats->addRuntimeStat("numDictDistinctBaseVectors", RuntimeCounter(inputEncodingStats_.numDictDistinctBaseVectors));
-    lockedStats->addRuntimeStat("numDictBaseRows", RuntimeCounter(inputEncodingStats_.numDictBaseRows));
+    if (recordInputEncodingStats_) {
+      lockedStats->addRuntimeStat("numFlatVectors", RuntimeCounter(inputEncodingStats_.numFlatVectors));
+      lockedStats->addRuntimeStat("numFlatRows", RuntimeCounter(inputEncodingStats_.numFlatRows));
+      lockedStats->addRuntimeStat("numConstantVectors", RuntimeCounter(inputEncodingStats_.numConstantVectors));
+      lockedStats->addRuntimeStat("numConstantRows", RuntimeCounter(inputEncodingStats_.numConstantRows));
+      lockedStats->addRuntimeStat("numDictVectors", RuntimeCounter(inputEncodingStats_.numDictVectors));
+      lockedStats->addRuntimeStat("numDictRows", RuntimeCounter(inputEncodingStats_.numDictRows));
+      lockedStats->addRuntimeStat("numOtherVectors", RuntimeCounter(inputEncodingStats_.numOtherVectors));
+      lockedStats->addRuntimeStat("numOtherRows", RuntimeCounter(inputEncodingStats_.numOtherRows));
+      lockedStats->addRuntimeStat("numDictDistinctBaseVectors", RuntimeCounter(inputEncodingStats_.numDictDistinctBaseVectors));
+      lockedStats->addRuntimeStat("numDictBaseRows", RuntimeCounter(inputEncodingStats_.numDictBaseRows));
+    }
   }
 
   return nullptr;
@@ -302,7 +330,6 @@ void OptimizedPartitionedOutput::flush() {
 
 void OptimizedPartitionedOutput::recordSerializerInputEncodings(
     const RowVectorPtr& input) {
-  std::unordered_set<const BaseVector*> distinctBaseVectors;
   for (column_index_t outputColumn = 0; outputColumn < outputType_->size(); ++outputColumn) {
     const auto inputColumn = serializerInputByOutput_.empty()
         ? outputColumn
@@ -322,11 +349,8 @@ void OptimizedPartitionedOutput::recordSerializerInputEncodings(
         ++inputEncodingStats_.numDictVectors;
         inputEncodingStats_.numDictRows += input->size();
         const auto& base = child->valueVector();
-        VELOX_DCHECK_NOT_NULL(base);
-        if (distinctBaseVectors.insert(base.get()).second) {
-          ++inputEncodingStats_.numDictDistinctBaseVectors;
-          inputEncodingStats_.numDictBaseRows += base->size();
-        }
+        VELOX_CHECK_NOT_NULL(base);
+        localDistinctBaseVectors_.try_emplace(base, base->size());
         break;
       }
       default:
@@ -334,6 +358,14 @@ void OptimizedPartitionedOutput::recordSerializerInputEncodings(
         inputEncodingStats_.numOtherRows += child->size();
     }
   }
+}
+
+void OptimizedPartitionedOutput::mergeSerializerInputEncodingStats() {
+  const auto result = sharedState_->merge(localDistinctBaseVectors_);
+  inputEncodingStats_.numDictDistinctBaseVectors +=
+      result.numDistinctBaseVectors;
+  inputEncodingStats_.numDictBaseRows += result.numBaseRows;
+  localDistinctBaseVectors_.clear();
 }
 
 } // namespace facebook::velox::exec

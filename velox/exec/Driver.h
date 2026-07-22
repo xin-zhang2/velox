@@ -37,6 +37,7 @@ namespace facebook::velox::exec {
 class Driver;
 class ExchangeClient;
 class Operator;
+class OptimizedPartitionedOutputSharedState;
 struct OperatorStats;
 class Task;
 
@@ -786,6 +787,9 @@ struct DriverFactory {
   /// Function that will generate the final operator of a driver being
   /// constructed.
   OperatorSupplier operatorSupplier;
+  /// Shared by OptimizedPartitionedOutput operators created by this factory.
+  std::shared_ptr<OptimizedPartitionedOutputSharedState>
+      optimizedPartitionedOutputSharedState;
   /// Maximum number of drivers that can be run concurrently in this pipeline.
   uint32_t maxDrivers;
   /// Number of drivers that will be run concurrently in this pipeline for one
