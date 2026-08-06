@@ -1602,8 +1602,7 @@ void PrestoIterativePartitioningSerializer::flushSingleFlatVector<
   const auto* rawNulls = flatVector->baseVector()->rawNulls();
   const auto* partitionOffsets = flatVector->rawPartitionOffsets();
 
-  Scratch scratch;
-  ScratchPtr<int8_t> values(scratch);
+  ScratchPtr<int8_t> values(scratch_);
   constexpr auto numRowsPerChunk = std::max<vector_size_t>(1, kChunkBytes);
   int8_t* chunk = nullptr;
 
@@ -1677,8 +1676,7 @@ void PrestoIterativePartitioningSerializer::flushSingleConstantVector(
   const auto value = constantVector->valueAtFast(0);
   const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
 
-  Scratch scratch;
-  ScratchPtr<T> values(scratch);
+  ScratchPtr<T> values(scratch_);
   const auto numRowsPerChunk =
       std::max<vector_size_t>(1, kChunkBytes / sizeof(T));
   const char* chunkBytes = nullptr;
@@ -1729,8 +1727,7 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector(
   const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
   const bool dictMayHaveNulls = dictionaryVector->mayHaveNulls();
 
-  Scratch scratch;
-  ScratchPtr<T> values(scratch);
+  ScratchPtr<T> values(scratch_);
   const auto numRowsPerChunk =
       std::max<vector_size_t>(1, kChunkBytes / sizeof(T));
   auto* chunk = values.get(numRowsPerChunk);
@@ -1839,8 +1836,7 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector<
   const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
   const bool dictMayHaveNulls = dictionaryVector->mayHaveNulls();
 
-  Scratch scratch;
-  ScratchPtr<int8_t> values(scratch);
+  ScratchPtr<int8_t> values(scratch_);
   constexpr auto numRowsPerChunk = std::max<vector_size_t>(1, kChunkBytes);
   auto* chunk = values.get(numRowsPerChunk);
 
@@ -2034,8 +2030,7 @@ void PrestoIterativePartitioningSerializer::
   const auto numRowsPerChunk =
       std::max<vector_size_t>(1, kChunkBytes / valueSize);
   const char* chunkBytes = value.data();
-  Scratch scratch;
-  ScratchPtr<char> chunk(scratch);
+  ScratchPtr<char> chunk(scratch_);
   if (numRowsPerChunk > 1) {
     auto* ptr = chunk.get(numRowsPerChunk * valueSize);
     for (vector_size_t i = 0; i < numRowsPerChunk; ++i) {
@@ -2265,8 +2260,7 @@ void PrestoIterativePartitioningSerializer::flushFlatValues(
     const std::vector<IOBufOutputStream*>& outputStreams) const {
   const auto typeWidth = sizeof(T);
 
-  Scratch scratch;
-  ScratchPtr<T> values(scratch);
+  ScratchPtr<T> values(scratch_);
   const auto numRowsPerChunk =
       std::max<vector_size_t>(1, kChunkBytes / typeWidth);
   T* chunk = nullptr;

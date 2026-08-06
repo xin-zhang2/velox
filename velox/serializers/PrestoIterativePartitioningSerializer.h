@@ -286,6 +286,8 @@ class PrestoIterativePartitioningSerializer {
   /// Accumulated state for all batches buffered since the last
   /// flush.
   std::unique_ptr<BufferState> bufferState_;
+
+  mutable Scratch scratch_;
 };
 
 } // namespace facebook::velox::serializer::presto
