@@ -23,9 +23,12 @@
 
 #include "velox/common/base/BitUtil.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/functions/prestosql/types/IPAddressType.h"
+#include "velox/functions/prestosql/types/UuidType.h"
 #include "velox/serializers/PrestoIterativePartitioningSerializer.h"
 
 #include "velox/serializers/PrestoSerializerSerializationUtils.h"
+#include "velox/type/HugeInt.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
 
 using namespace facebook::velox;
@@ -2026,6 +2029,138 @@ TEST_F(PrestoIterativePartitioningSerializerTest, varbinaryWithNulls) {
       sortedNullableValues<StringView>(r1, 0),
       (std::vector<std::optional<StringView>>{
           std::nullopt, StringView(binary1), StringView(binary3)}));
+}
+
+TEST_F(PrestoIterativePartitioningSerializerTest, longDecimalWithNulls) {
+  auto colType = DECIMAL(38, 4);
+  auto type = ROW({"d"}, {colType});
+
+  const auto big = HugeInt::build(0x1234567890ABCDEF, 0xFEDCBA0987654321);
+  auto col = makeNullableFlatVector<int128_t>(
+      {big, -big, std::nullopt, -1, 0, 42}, colType);
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(makeRowVector({"d"}, {col}), {0, 1, 0, 1, 0, 1});
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto expected0 = makeRowVector(
+      {"d"},
+      {makeNullableFlatVector<int128_t>({big, std::nullopt, 0}, colType)});
+  auto expected1 = makeRowVector(
+      {"d"}, {makeNullableFlatVector<int128_t>({-big, -1, 42}, colType)});
+
+  assertEqualVectors(expected0, deserialize(*ioBufs.at(0).first, type));
+  assertEqualVectors(expected1, deserialize(*ioBufs.at(1).first, type));
+}
+
+TEST_F(PrestoIterativePartitioningSerializerTest, longDecimalConstant) {
+  auto colType = DECIMAL(38, 2);
+  auto type = ROW({"d"}, {colType});
+
+  const auto value = -HugeInt::build(0xDEADBEEF, 0x12345678);
+  auto input =
+      makeRowVector({"d"}, {makeConstant<int128_t>(value, 5, colType)});
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(input, {0, 1, 0, 1, 0});
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  assertEqualVectors(
+      makeRowVector(
+          {"d"}, {makeFlatVector<int128_t>({value, value, value}, colType)}),
+      deserialize(*ioBufs.at(0).first, type));
+  assertEqualVectors(
+      makeRowVector({"d"}, {makeFlatVector<int128_t>({value, value}, colType)}),
+      deserialize(*ioBufs.at(1).first, type));
+}
+
+TEST_F(PrestoIterativePartitioningSerializerTest, longDecimalDictionary) {
+  auto colType = DECIMAL(38, 0);
+  auto type = ROW({"d"}, {colType});
+
+  const auto big = HugeInt::build(0x0123456789ABCDEF, 0x1122334455667788);
+  auto base = makeNullableFlatVector<int128_t>(
+      {-big, big, std::nullopt, -7, 9}, colType);
+  auto dictionary = BaseVector::wrapInDictionary(
+      nullptr, makeIndices({4, 3, 2, 1, 0, 3}), 6, base);
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(makeRowVector({"d"}, {dictionary}), {0, 1, 0, 1, 0, 1});
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto expected0 = makeRowVector(
+      {"d"},
+      {makeNullableFlatVector<int128_t>({9, std::nullopt, -big}, colType)});
+  auto expected1 = makeRowVector(
+      {"d"}, {makeNullableFlatVector<int128_t>({-7, big, -7}, colType)});
+
+  assertEqualVectors(expected0, deserialize(*ioBufs.at(0).first, type));
+  assertEqualVectors(expected1, deserialize(*ioBufs.at(1).first, type));
+}
+
+TEST_F(PrestoIterativePartitioningSerializerTest, uuidWithNulls) {
+  auto type = ROW({"u"}, {UUID()});
+
+  auto col = makeNullableFlatVector<int128_t>(
+      {HugeInt::build(0x1122334455667788, 0x99AABBCCDDEEFF00),
+       std::nullopt,
+       HugeInt::build(0x0000000000000001, 0x8000000000000000),
+       0,
+       -1},
+      UUID());
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(makeRowVector({"u"}, {col}), {0, 1, 0, 1, 0});
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto expected0 = makeRowVector(
+      {"u"},
+      {makeNullableFlatVector<int128_t>(
+          {HugeInt::build(0x1122334455667788, 0x99AABBCCDDEEFF00),
+           HugeInt::build(0x0000000000000001, 0x8000000000000000),
+           -1},
+          UUID())});
+  auto expected1 = makeRowVector(
+      {"u"}, {makeNullableFlatVector<int128_t>({std::nullopt, 0}, UUID())});
+
+  assertEqualVectors(expected0, deserialize(*ioBufs.at(0).first, type));
+  assertEqualVectors(expected1, deserialize(*ioBufs.at(1).first, type));
+}
+
+TEST_F(PrestoIterativePartitioningSerializerTest, ipAddressWithNulls) {
+  auto type = ROW({"a"}, {IPADDRESS()});
+
+  auto col = makeNullableFlatVector<int128_t>(
+      {HugeInt::build(0x20010DB885A30000, 0x00008A2E03707334),
+       HugeInt::build(0, 0xFFFF0A000001), // ::ffff:10.0.0.1
+       std::nullopt,
+       HugeInt::build(0, 0xFFFFC0A80101)}, // ::ffff:192.168.1.1
+      IPADDRESS());
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(makeRowVector({"a"}, {col}), {0, 1, 0, 1});
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto expected0 = makeRowVector(
+      {"a"},
+      {makeNullableFlatVector<int128_t>(
+          {HugeInt::build(0x20010DB885A30000, 0x00008A2E03707334),
+           std::nullopt},
+          IPADDRESS())});
+  auto expected1 = makeRowVector(
+      {"a"},
+      {makeNullableFlatVector<int128_t>(
+          {HugeInt::build(0, 0xFFFF0A000001),
+           HugeInt::build(0, 0xFFFFC0A80101)},
+          IPADDRESS())});
+
+  assertEqualVectors(expected0, deserialize(*ioBufs.at(0).first, type));
+  assertEqualVectors(expected1, deserialize(*ioBufs.at(1).first, type));
 }
 
 TEST_F(
