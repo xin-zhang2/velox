@@ -16,10 +16,14 @@
 #include "velox/serializers/PrestoIterativePartitioningSerializer.h"
 
 #include <algorithm>
+#include <functional>
 #include <optional>
 
 #include "velox/common/base/BitUtil.h"
 #include "velox/common/base/Nulls.h"
+#include "velox/functions/prestosql/types/IPAddressType.h"
+#include "velox/functions/prestosql/types/UuidType.h"
+#include "velox/serializers/PrestoSerializerSerializationUtils.h"
 #include "velox/type/Type.h"
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/ConstantVector.h"
@@ -88,6 +92,19 @@ std::string_view typeToEncodingName(const TypePtr& type) {
     default:
       VELOX_FAIL("Unsupported type kind: {}", static_cast<int>(type->kind()));
   }
+}
+
+std::function<int128_t(int128_t)> int128Converter(const TypePtr& type) {
+  if (type->isLongDecimal()) {
+    return detail::toJavaDecimalValue;
+  }
+  if (isUuidType(type)) {
+    return detail::toJavaUuidValue;
+  }
+  if (isIPAddressType(type)) {
+    return detail::reverseIpAddressByteOrder;
+  }
+  return nullptr;
 }
 
 /// Finalizes the Presto page CRC by mixing in the codec marker, row count,
@@ -1912,6 +1929,49 @@ void PrestoIterativePartitioningSerializer::flushSingleFlatVector<
       [rawValues](vector_size_t row) { return rawValues[row]; });
 }
 
+template <>
+void PrestoIterativePartitioningSerializer::flushSingleFlatVector<
+    TypeKind::HUGEINT>(
+    const PartitionedVectorPtr& partitionedVector,
+    const std::vector<IOBufOutputStream*>& outputStreams,
+    const uint64_t* parentNulls) const {
+  auto* flatVector = partitionedVector->as<PartitionedFlatVector<int128_t>>();
+  VELOX_DCHECK_NOT_NULL(flatVector);
+
+  const auto* rawValues =
+      flatVector->baseVector()->as<FlatVector<int128_t>>()->rawValues();
+  const auto* rawNulls = flatVector->baseVector()->rawNulls();
+  const auto* partitionOffsets = flatVector->rawPartitionOffsets();
+
+  const auto converter = int128Converter(flatVector->baseVector()->type());
+  if (!converter) {
+    flushValuesChunked(
+        rawValues,
+        rawNulls,
+        parentNulls,
+        partitionOffsets,
+        numPartitions_,
+        scratch_,
+        outputStreams,
+        [rawValues](vector_size_t row) { return rawValues[row]; });
+    return;
+  }
+
+  // Converted values differ from the stored ones, so the contiguous
+  // fast path does not apply; every value goes through the scratch chunk.
+  flushValuesChunked<int128_t>(
+      nullptr,
+      rawNulls,
+      parentNulls,
+      partitionOffsets,
+      numPartitions_,
+      scratch_,
+      outputStreams,
+      [rawValues, &converter](vector_size_t row) {
+        return converter(rawValues[row]);
+      });
+}
+
 template <TypeKind kind>
 void PrestoIterativePartitioningSerializer::flushSingleConstantVector(
     const PartitionedVectorPtr& partitionedVector,
@@ -1932,8 +1992,14 @@ void PrestoIterativePartitioningSerializer::flushSingleConstantVector(
     return;
   }
 
+  auto value = constantVector->valueAtFast(0);
+  if constexpr (kind == TypeKind::HUGEINT) {
+    if (const auto converter = int128Converter(constantVector->type())) {
+      value = converter(value);
+    }
+  }
   flushConstantValue(
-      constantVector->valueAtFast(0),
+      value,
       partitionedVector->rawPartitionOffsets(),
       parentLiveCounts,
       numPartitions_,
@@ -2011,6 +2077,15 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector(
     rawNulls = combined ? combined->as<uint64_t>() : nullptr;
   }
 
+  const auto converter =
+      [converter = int128Converter(baseVector->type())](T value) -> T {
+    if constexpr (kind == TypeKind::HUGEINT) {
+      return converter ? converter(value) : value;
+    } else {
+      return value;
+    }
+  };
+
   flushValuesChunked<WireType>(
       nullptr,
       rawNulls,
@@ -2019,8 +2094,8 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector(
       numPartitions_,
       scratch_,
       outputStreams,
-      [dictionaryVector](vector_size_t row) -> WireType {
-        return dictionaryVector->valueAtFast(row);
+      [dictionaryVector, &converter](vector_size_t row) -> WireType {
+        return converter(dictionaryVector->valueAtFast(row));
       });
 }
 
