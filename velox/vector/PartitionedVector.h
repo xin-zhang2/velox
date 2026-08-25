@@ -16,6 +16,7 @@
 #pragma once
 
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "velox/vector/BaseVector.h"
@@ -80,6 +81,14 @@ struct PartitionBuildContext {
   /// buffer. Avoids repeated allocation and scatter when dictionary columns
   /// share an input indices buffer.
   std::unordered_map<BufferPtr, BufferPtr> partitionedDictionaryIndices;
+  /// Cache of PartitionedVectors built during the current create() call,
+  /// keyed by the input vector object. The same vector can appear under more
+  /// than one column of a RowVector, e.g. when an expression returns an input
+  /// column unchanged. The in-place scatter must run exactly once for it, so
+  /// later occurrences reuse the already-partitioned result instead of
+  /// re-permuting the vector's buffers.
+  std::unordered_map<const BaseVector*, PartitionedVectorPtr>
+      partitionedVectors;
 
   PartitionBuildContext() = default;
 };

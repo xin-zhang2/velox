@@ -1074,6 +1074,43 @@ TEST_F(PrestoIterativePartitioningSerializerTest, appendEmptyVector) {
 // ── Lifecycle
 // ─────────────────────────────────────────────────────────────────
 
+// Two output columns backed by the same VectorPtr must stay row-aligned.
+// Aliasing arises in real plans when an expression such as
+// CASE WHEN c THEN x END returns the input column x directly, so the shuffle
+// input holds the same vector under two children (e.g. TPC-DS Q36/Q86).
+TEST_F(PrestoIterativePartitioningSerializerTest, aliasedChildrenStayAligned) {
+  auto type = ROW({"id", "v", "v2"}, {BIGINT(), VARCHAR(), VARCHAR()});
+
+  auto shared = makeFlatVector<StringView>(
+      {"apple", "banana", "cherry", "durian", "elderberry", "feijoa"});
+  auto input = makeRowVector(
+      {"id", "v", "v2"},
+      {makeFlatVector<int64_t>({0, 1, 2, 3, 4, 5}), shared, shared});
+
+  auto serializer = makeSerializer(type, 2);
+  serializer->append(input, {0, 1, 0, 1, 0, 1});
+
+  auto ioBufs = serializer->flush();
+  ASSERT_EQ(ioBufs.size(), 2);
+
+  auto p0 = deserialize(*ioBufs.at(0).first, type);
+  auto p1 = deserialize(*ioBufs.at(1).first, type);
+
+  auto expectedP0 = makeRowVector(
+      {"id", "v", "v2"},
+      {makeFlatVector<int64_t>({0, 2, 4}),
+       makeFlatVector<StringView>({"apple", "cherry", "elderberry"}),
+       makeFlatVector<StringView>({"apple", "cherry", "elderberry"})});
+  auto expectedP1 = makeRowVector(
+      {"id", "v", "v2"},
+      {makeFlatVector<int64_t>({1, 3, 5}),
+       makeFlatVector<StringView>({"banana", "durian", "feijoa"}),
+       makeFlatVector<StringView>({"banana", "durian", "feijoa"})});
+
+  assertEqualVectors(expectedP0, p0);
+  assertEqualVectors(expectedP1, p1);
+}
+
 // Multiple append() calls accumulate correctly before flush.
 TEST_F(PrestoIterativePartitioningSerializerTest, multipleAppends) {
   auto type = ROW({"v"}, {BIGINT()});

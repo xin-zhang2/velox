@@ -499,17 +499,17 @@ void OptimizedPartitionedOutput::flush() {
       shouldBlock = true;
       future_ = std::move(future);
     }
+  }
+
   auto lockedStats = stats_.wlock();
-  lockedStats->addOutputVector(flushedBytes, flushedRows);
   if (flushedRows > 0) {
+    lockedStats->addOutputVector(flushedBytes, flushedRows);
     ++numFlushes_;
     lockedStats->addRuntimeStat("numFlushes", RuntimeCounter(1));
   }
   if (shouldBlock) {
     ++numBlockedTimes_;
     lockedStats->addRuntimeStat("numBlockedTimes", RuntimeCounter(1));
-  }
-
   }
 }
 
