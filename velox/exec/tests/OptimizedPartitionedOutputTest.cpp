@@ -207,7 +207,8 @@ class OptimizedPartitionedOutputTest : public OperatorTestBase {
              std::move(promise))](
             std::vector<std::unique_ptr<folly::IOBuf>> pages,
             int64_t /*sequence*/,
-            std::vector<int64_t> /*remainingBytes*/) {
+            std::vector<int64_t> /*:q*/,
+            std::vector<int64_t> /*pageNumRows*/) {
           result->setValue(std::move(pages));
         }));
     auto future = std::move(semiFuture).via(executor_.get());
