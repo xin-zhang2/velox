@@ -16,8 +16,11 @@
 
 #pragma once
 
-#include "velox/exec/Operator.h"
+#include <optional>
+
 #include "velox/exec/DefaultOutputBufferManager.h"
+#include "velox/exec/NullKeyRowsCollector.h"
+#include "velox/exec/Operator.h"
 #include "velox/serializers/PrestoIterativePartitioningSerializer.h"
 
 namespace facebook::velox::exec {
@@ -33,6 +36,17 @@ class OptimizedPartitionedOutput : public Operator {
   /// network MTU.
   static constexpr uint64_t kMinDestinationSize = 60 * 1024;
   static constexpr vector_size_t kMaxRowsPerDestinationBeforeFlush = 10'000;
+
+  /// Maximum rows in one dictionary-expanded replica append. Bounds the size
+  /// of the indices buffer built per chunk when replicating null-key rows to
+  /// all destinations (replicateNullsAndAny).
+  static constexpr int64_t kMaxReplicaRowsPerAppend = 100'000;
+
+  /// Maximum replication appends (dictionary chunks or per-destination
+  /// single-partition appends) retained by the serializer between flushes.
+  /// Each retained append owns per-partition metadata that bytesBuffered()
+  /// does not count, so byte thresholds alone do not bound it.
+  static constexpr uint32_t kMaxReplicationAppendsPerFlush = 64;
 
   OptimizedPartitionedOutput(
       int32_t operatorId,
@@ -56,9 +70,51 @@ class OptimizedPartitionedOutput : public Operator {
   bool isFinished() override;
 
  private:
+  // Suspended replicateNullsAndAny delivery, saved when a replication append
+  // cannot proceed because the output buffer is blocked. getOutput() resumes
+  // it; needsInput() returns false while it is set.
+  struct PendingReplication {
+    // Private flat copy of the replicated rows; never mutated by appends.
+    RowVectorPtr compactCopy;
+    // First destination that has not received the replicated rows yet.
+    uint32_t nextDestination;
+    // Destination already served by the main append.
+    uint32_t replicaHome;
+  };
+
   /// Computes the serializer input columns and the mapping from output columns
   /// to serializer input columns.
   void initializeSerializerLayout();
+
+  // Deep-copies 'rows' (sorted ascending) of 'source' into a new compact flat
+  // RowVector owned by the operator's pool.
+  RowVectorPtr copyRows(
+      const RowVectorPtr& source,
+      const std::vector<vector_size_t>& rows);
+
+  // Builds one dictionary-expanded chunk: every row of 'compactCopy' repeated
+  // once per destination in 'chunkDestinations', wrapped over the compact
+  // copy's children. Fills replicaPartitions_ to match.
+  RowVectorPtr makeReplicaChunk(
+      const RowVectorPtr& compactCopy,
+      const std::vector<uint32_t>& chunkDestinations);
+
+  // Shared pre-flush rule for replication appends: flushes when the byte
+  // estimate, the per-destination row cap, the aggregate row-counter headroom,
+  // or the replication-append cap requires it. Returns false when the append
+  // must be suspended instead because the operator is blocked (an ungated
+  // second blocked flush would overwrite future_).
+  bool ensureReplicationAppendCapacity(const RowVectorPtr& appendInput);
+
+  // Delivers 'compactCopy' to every destination except 'replicaHome',
+  // starting at 'nextDestination'. Uses chunked dictionary-expanded appends,
+  // falling back to per-destination single-partition appends when a chunk
+  // would cover at most one destination. Saves pendingReplication_ and
+  // returns early when blocked.
+  void appendReplicatedRows(
+      RowVectorPtr compactCopy,
+      uint32_t replicaHome,
+      uint32_t nextDestination);
 
   /// Builds the RowVector consumed by the serializer. When the output layout
   /// has duplicated columns, this projects only the distinct columns and
@@ -107,6 +163,21 @@ class OptimizedPartitionedOutput : public Operator {
   BlockingReason blockingReason_{BlockingReason::kNotBlocked};
   ContinueFuture future_;
   bool finished_{false};
+
+  /// True once one arbitrary row has been replicated to all destinations
+  /// (replicateNullsAndAny); persists across flush cycles.
+  bool replicatedAny_{false};
+  /// Replication appends retained by the serializer since the last flush.
+  /// Bounded by kMaxReplicationAppendsPerFlush; reset in flush().
+  uint32_t replicationAppendsSinceLastFlush_{0};
+  /// Detects rows with null partition keys for replicateNullsAndAny.
+  NullKeyRowsCollector nullKeyRows_;
+  /// Set while replica delivery is suspended on a blocked output buffer.
+  std::optional<PendingReplication> pendingReplication_;
+  /// Reusable buffer for the replicated row indices of the current batch.
+  std::vector<vector_size_t> replicatedRowIds_;
+  /// Reusable per-row partition assignments for dictionary-expanded chunks.
+  std::vector<uint32_t> replicaPartitions_;
 
   /// Counts addInput() calls that appended at least one row to the serializer.
   /// Exposed as the "numAppendTimes" runtime stat.

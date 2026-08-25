@@ -17,6 +17,7 @@
 
 #include <folly/Random.h>
 #include "velox/exec/DefaultOutputBufferManager.h"
+#include "velox/exec/NullKeyRowsCollector.h"
 #include "velox/exec/Operator.h"
 #include "velox/row/CompactRow.h"
 #include "velox/row/UnsafeRowFast.h"
@@ -222,9 +223,6 @@ class PartitionedOutput : public Operator {
 
   void estimateRowSizes();
 
-  // Collect all rows with null keys into nullRows_.
-  void collectNullRows();
-
   // If compression in serde is enabled, this is the minimum compression that
   // must be achieved before starting to skip compression. Used for testing.
   inline static float minCompressionRatio_ = 0.8;
@@ -265,10 +263,9 @@ class PartitionedOutput : public Operator {
   std::unique_ptr<row::UnsafeRowFast> outputUnsafeRow_;
 
   // Reusable memory.
-  SelectivityVector rows_;
-  SelectivityVector nullRows_;
   std::vector<uint32_t> partitions_;
-  std::vector<DecodedVector> decodedVectors_;
+  // Detects rows with null partition keys for replicateNullsAndAny.
+  NullKeyRowsCollector nullKeyRows_;
   Scratch scratch_;
 };
 

@@ -16,6 +16,7 @@
 
 #include "velox/exec/OptimizedPartitionedOutput.h"
 
+#include <limits>
 #include <unordered_map>
 
 #include "velox/exec/HashPartitionFunction.h"
@@ -96,10 +97,6 @@ OptimizedPartitionedOutput::OptimizedPartitionedOutput(
 }
 
 void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
-  VELOX_USER_CHECK(
-      !replicateNullsAndAny_,
-      "replicateNullsAndAny is not yet supported by OptimizedPartitionedOutput");
-
   auto serializerInput = prepareSerializerInput(input);
 
   if (serializer_->maxRowsBufferedPerPartition() >= kMaxRowsPerDestinationBeforeFlush ||
@@ -112,10 +109,61 @@ void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
       ? std::optional<uint32_t>{0u}
       : partitionFunction_->partition(*input, partitions_);
 
+  // Replication preparation must complete before the main append: the
+  // multi-partition append permutes the input's buffers in place, and the
+  // serializer input shares child vectors with 'input', so neither the
+  // null-key decode nor the deep copy may run after it.
+  RowVectorPtr compactCopy;
+  uint32_t replicaHome = 0;
+  if (replicateNullsAndAny_ && numDestinations_ > 1 && input->size() > 0) {
+    const auto& nullRows = nullKeyRows_.collect(*input, keyChannels_);
+    replicatedRowIds_.clear();
+    if (!replicatedAny_) {
+      replicatedRowIds_.push_back(0);
+    }
+    nullRows.applyToSelected([&](vector_size_t row) {
+      // Row 0 may already be in the set as the replicated "any" row.
+      if (replicatedAny_ || row != 0) {
+        replicatedRowIds_.push_back(row);
+      }
+    });
+
+    if (!replicatedRowIds_.empty()) {
+      if (singlePartition.has_value()) {
+        // 'partitions_' is stale when the partition function reported a
+        // single partition; the whole batch already lands on it.
+        replicaHome = singlePartition.value();
+      } else {
+        // Force a uniform home so the unmodified main append delivers the
+        // replica-home copy; a replicated row's hash partition is irrelevant
+        // because the row reaches every destination anyway.
+        replicaHome = 0;
+        for (const auto row : replicatedRowIds_) {
+          partitions_[row] = 0;
+        }
+      }
+      compactCopy = copyRows(serializerInput, replicatedRowIds_);
+    }
+  }
+
   if (singlePartition.has_value()) {
     serializer_->append(serializerInput, *singlePartition);
   } else {
     serializer_->append(serializerInput, partitions_);
+  }
+
+  if (compactCopy != nullptr) {
+    replicatedAny_ = true;
+    {
+      auto lockedStats = stats_.wlock();
+      // The shuffle amplification: additional emitted copies. Both operands
+      // originate as 32-bit values, so multiply in 64-bit.
+      lockedStats->addRuntimeStat(
+          "numReplicatedRows",
+          RuntimeCounter(static_cast<int64_t>(
+              uint64_t(compactCopy->size()) * uint64_t(numDestinations_ - 1))));
+    }
+    appendReplicatedRows(std::move(compactCopy), replicaHome, 0);
   }
 
   auto lockedStats = stats_.wlock();
@@ -124,7 +172,10 @@ void OptimizedPartitionedOutput::addInput(RowVectorPtr input) {
 }
 
 bool OptimizedPartitionedOutput::needsInput() const {
-  return blockingReason_ == BlockingReason::kNotBlocked;
+  // No new input while replica delivery is suspended: the pending compact
+  // copy must reach its remaining destinations first.
+  return blockingReason_ == BlockingReason::kNotBlocked &&
+      !pendingReplication_.has_value();
 }
 
 RowVectorPtr OptimizedPartitionedOutput::getOutput() {
@@ -133,6 +184,21 @@ RowVectorPtr OptimizedPartitionedOutput::getOutput() {
   }
 
   blockingReason_ = BlockingReason::kNotBlocked;
+
+  // Resume suspended replica delivery before any finalization: the remaining
+  // destinations must receive the replicated rows even after noMoreInput().
+  if (pendingReplication_.has_value()) {
+    auto pending = std::move(pendingReplication_.value());
+    pendingReplication_.reset();
+    appendReplicatedRows(
+        std::move(pending.compactCopy),
+        pending.replicaHome,
+        pending.nextDestination);
+    // Re-suspended on a still-full output buffer; try again after it drains.
+    if (blockingReason_ != BlockingReason::kNotBlocked) {
+      return nullptr;
+    }
+  }
 
   if (noMoreInput_ || serializer_->bytesBuffered() >= maxOutputBufferBytes_ ||
     serializer_->maxRowsBufferedPerPartition() >= kMaxRowsPerDestinationBeforeFlush) {
@@ -235,7 +301,168 @@ RowVectorPtr OptimizedPartitionedOutput::prepareSerializerInput(
       std::move(serializerInputColumns));
 }
 
+RowVectorPtr OptimizedPartitionedOutput::copyRows(
+    const RowVectorPtr& source,
+    const std::vector<vector_size_t>& rows) {
+  const auto numRows = static_cast<vector_size_t>(rows.size());
+  auto copy =
+      BaseVector::create<RowVector>(serializerInputType_, numRows, pool_);
+
+  // Coalesce runs of adjacent row indices ('rows' is sorted ascending).
+  std::vector<BaseVector::CopyRange> ranges;
+  vector_size_t targetIndex = 0;
+  for (vector_size_t i = 0; i < numRows;) {
+    vector_size_t runEnd = i + 1;
+    while (runEnd < numRows && rows[runEnd] == rows[runEnd - 1] + 1) {
+      ++runEnd;
+    }
+    ranges.push_back({rows[i], targetIndex, runEnd - i});
+    targetIndex += runEnd - i;
+    i = runEnd;
+  }
+  copy->copyRanges(source.get(), folly::Range(ranges.data(), ranges.size()));
+  return copy;
+}
+
+RowVectorPtr OptimizedPartitionedOutput::makeReplicaChunk(
+    const RowVectorPtr& compactCopy,
+    const std::vector<uint32_t>& chunkDestinations) {
+  const auto numRows = compactCopy->size();
+  const auto chunkSize = static_cast<vector_size_t>(
+      numRows * static_cast<vector_size_t>(chunkDestinations.size()));
+
+  replicaPartitions_.resize(chunkSize);
+
+  if (serializerInputType_->size() == 0) {
+    // A dictionary wrap over a zero-child RowVector is degenerate; row counts
+    // come from the partitions vector alone.
+    vector_size_t offset = 0;
+    for (const auto destination : chunkDestinations) {
+      std::fill_n(replicaPartitions_.begin() + offset, numRows, destination);
+      offset += numRows;
+    }
+    return std::make_shared<RowVector>(
+        pool_,
+        serializerInputType_,
+        nullptr /*nulls*/,
+        chunkSize,
+        std::vector<VectorPtr>{});
+  }
+
+  auto indices = allocateIndices(chunkSize, pool_);
+  auto* rawIndices = indices->asMutable<vector_size_t>();
+  vector_size_t offset = 0;
+  for (const auto destination : chunkDestinations) {
+    for (vector_size_t row = 0; row < numRows; ++row) {
+      rawIndices[offset] = row;
+      replicaPartitions_[offset] = destination;
+      ++offset;
+    }
+  }
+
+  // Wrapping the compact copy is safe only because the copy is private to
+  // this operator and no append ever mutates its buffers; the multi-partition
+  // append scatters only the freshly allocated indices buffer. Wrapping the
+  // live input instead would alias buffers the main append permutes in place.
+  // The wrap must carry no wrapper nulls: the dictionary partition path
+  // scatters wrapper nulls in place, and the replicated rows' nulls live in
+  // the compact copy's children.
+  std::vector<VectorPtr> children;
+  children.reserve(compactCopy->childrenSize());
+  for (const auto& child : compactCopy->children()) {
+    children.push_back(
+        BaseVector::wrapInDictionary(nullptr, indices, chunkSize, child));
+  }
+  return std::make_shared<RowVector>(
+      pool_,
+      serializerInputType_,
+      nullptr /*nulls*/,
+      chunkSize,
+      std::move(children));
+}
+
+bool OptimizedPartitionedOutput::ensureReplicationAppendCapacity(
+    const RowVectorPtr& appendInput) {
+  if (blockingReason_ != BlockingReason::kNotBlocked) {
+    return false;
+  }
+  // rowsBuffered() is an int32_t aggregate that byte thresholds do not bound
+  // for zero- or narrow-column layouts; check its headroom in 64-bit.
+  const int64_t rowsAfterAppend =
+      static_cast<int64_t>(serializer_->rowsBuffered()) + appendInput->size();
+  const bool needsFlush =
+      serializer_->maxRowsBufferedPerPartition() >=
+          kMaxRowsPerDestinationBeforeFlush ||
+      serializer_->estimateBytesAfterAppend(appendInput) >
+          maxOutputBufferBytes_ ||
+      rowsAfterAppend > std::numeric_limits<vector_size_t>::max() ||
+      replicationAppendsSinceLastFlush_ >= kMaxReplicationAppendsPerFlush;
+  if (needsFlush) {
+    flush();
+    return blockingReason_ == BlockingReason::kNotBlocked;
+  }
+  return true;
+}
+
+void OptimizedPartitionedOutput::appendReplicatedRows(
+    RowVectorPtr compactCopy,
+    uint32_t replicaHome,
+    uint32_t nextDestination) {
+  const int64_t numRows = compactCopy->size();
+  VELOX_CHECK_GT(numRows, 0);
+
+  // Fall back to per-destination single-partition appends when a chunk would
+  // cover at most one destination: a one-destination chunk is an identity
+  // wrap, strictly worse than the single-partition append, which moves no
+  // data at all.
+  const int64_t destinationsPerChunk = kMaxReplicaRowsPerAppend / numRows;
+  const bool useDictionaryChunks = destinationsPerChunk >= 2;
+
+  std::vector<uint32_t> chunkDestinations;
+  uint32_t destination = nextDestination;
+  while (destination < static_cast<uint32_t>(numDestinations_)) {
+    if (destination == replicaHome) {
+      ++destination;
+      continue;
+    }
+
+    if (useDictionaryChunks) {
+      chunkDestinations.clear();
+      uint32_t next = destination;
+      while (next < static_cast<uint32_t>(numDestinations_) &&
+             static_cast<int64_t>(chunkDestinations.size()) <
+                 destinationsPerChunk) {
+        if (next != replicaHome) {
+          chunkDestinations.push_back(next);
+        }
+        ++next;
+      }
+      auto chunk = makeReplicaChunk(compactCopy, chunkDestinations);
+      if (!ensureReplicationAppendCapacity(chunk)) {
+        pendingReplication_ = PendingReplication{
+            std::move(compactCopy), destination, replicaHome};
+        return;
+      }
+      serializer_->append(chunk, replicaPartitions_);
+      ++replicationAppendsSinceLastFlush_;
+      destination = next;
+    } else {
+      if (!ensureReplicationAppendCapacity(compactCopy)) {
+        pendingReplication_ = PendingReplication{
+            std::move(compactCopy), destination, replicaHome};
+        return;
+      }
+      // Single-partition appends never mutate the shared compact copy.
+      serializer_->append(compactCopy, destination);
+      ++replicationAppendsSinceLastFlush_;
+      ++destination;
+    }
+  }
+}
+
 void OptimizedPartitionedOutput::flush() {
+  replicationAppendsSinceLastFlush_ = 0;
+
   const auto flushedBytes = serializer_->bytesBuffered();
   const auto flushedRows = serializer_->rowsBuffered();
 
@@ -272,8 +499,6 @@ void OptimizedPartitionedOutput::flush() {
       shouldBlock = true;
       future_ = std::move(future);
     }
-  }
-
   auto lockedStats = stats_.wlock();
   lockedStats->addOutputVector(flushedBytes, flushedRows);
   if (flushedRows > 0) {
@@ -283,6 +508,8 @@ void OptimizedPartitionedOutput::flush() {
   if (shouldBlock) {
     ++numBlockedTimes_;
     lockedStats->addRuntimeStat("numBlockedTimes", RuntimeCounter(1));
+  }
+
   }
 }
 

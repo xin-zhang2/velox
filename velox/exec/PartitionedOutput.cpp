@@ -367,7 +367,7 @@ void PartitionedOutput::addInput(RowVectorPtr input) {
   } else {
     auto singlePartition = partitionFunction_->partition(*input_, partitions_);
     if (replicateNullsAndAny_) {
-      collectNullRows();
+      const auto& nullRows = nullKeyRows_.collect(*input_, keyChannels_);
 
       vector_size_t start = 0;
       if (!replicatedAny_) {
@@ -379,7 +379,7 @@ void PartitionedOutput::addInput(RowVectorPtr input) {
         start = 1;
       }
       for (auto i = start; i < numInput; ++i) {
-        if (nullRows_.isValid(i)) {
+        if (nullRows.isValid(i)) {
           for (auto& destination : destinations_) {
             destination->addRow(i);
           }
@@ -402,36 +402,6 @@ void PartitionedOutput::addInput(RowVectorPtr input) {
       }
     }
   }
-}
-
-void PartitionedOutput::collectNullRows() {
-  auto size = input_->size();
-  rows_.resize(size);
-  rows_.setAll();
-
-  nullRows_.resize(size);
-  nullRows_.clearAll();
-
-  decodedVectors_.resize(keyChannels_.size());
-
-  for (size_t keyChannelIndex = 0; keyChannelIndex < keyChannels_.size();
-       ++keyChannelIndex) {
-    column_index_t keyChannel = keyChannels_[keyChannelIndex];
-    // Skip constant channel.
-    if (keyChannel == kConstantChannel) {
-      continue;
-    }
-    auto& keyVector = input_->childAt(keyChannel);
-    if (keyVector->mayHaveNulls()) {
-      DecodedVector& decodedVector = decodedVectors_[keyChannelIndex];
-      decodedVector.decode(*keyVector, rows_);
-      if (auto* rawNulls = decodedVector.nulls(&rows_)) {
-        bits::orWithNegatedBits(
-            nullRows_.asMutableRange().bits(), rawNulls, 0, size);
-      }
-    }
-  }
-  nullRows_.updateBounds();
 }
 
 RowVectorPtr PartitionedOutput::getOutput() {
