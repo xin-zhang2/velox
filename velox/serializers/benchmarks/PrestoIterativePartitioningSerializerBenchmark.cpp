@@ -67,6 +67,17 @@ class PrestoIterativePartitioningSerializerBenchmark
         type);
   }
 
+  VectorPtr makeTimestampFlatColumn(vector_size_t size, int32_t nullPct) {
+    auto valueAt = [](auto row) {
+      return Timestamp(row, (row % 1'000) * 1'000'000);
+    };
+    if (nullPct == 0) {
+      return makeFlatVector<Timestamp>(size, valueAt);
+    }
+    return makeFlatVector<Timestamp>(
+        size, valueAt, [nullPct](auto row) { return (row % 100) < nullPct; });
+  }
+
   /// Creates a flat vector of the given TypeKind with the given null ratio.
   VectorPtr
   makeFlatColumn(vector_size_t size, TypeKind colKind, int32_t nullPct) {
@@ -83,6 +94,8 @@ class PrestoIterativePartitioningSerializerBenchmark
         return makeVariableWidthFlatColumn(size, VARCHAR(), nullPct);
       case TypeKind::VARBINARY:
         return makeVariableWidthFlatColumn(size, VARBINARY(), nullPct);
+      case TypeKind::TIMESTAMP:
+        return makeTimestampFlatColumn(size, nullPct);
       default:
         VELOX_UNSUPPORTED(
             "Unsupported TypeKind: {}", TypeKindName::toName(colKind));
@@ -108,6 +121,8 @@ class PrestoIterativePartitioningSerializerBenchmark
       case TypeKind::VARBINARY:
         return makeConstant<std::string>(
             std::string("\x01\x02\x03\x04", 4), size, VARBINARY());
+      case TypeKind::TIMESTAMP:
+        return makeConstant<Timestamp>(Timestamp(1'000, 500'000'000), size);
       default:
         VELOX_UNSUPPORTED(
             "Unsupported TypeKind: {}", TypeKindName::toName(colKind));
@@ -441,6 +456,7 @@ FLUSH_FOR_COLS(bigint, BIGINT)
 FLUSH_FOR_COLS(ldec, HUGEINT)
 FLUSH_FOR_COLS(varchar, VARCHAR)
 FLUSH_FOR_COLS(varbinary, VARBINARY)
+FLUSH_FOR_COLS(ts, TIMESTAMP)
 
 // Dictionary columns over a 1'024-value null-free base; nulls sit on the
 // wrapper. Fixed-width kinds exercise the shared chunked value writer;

@@ -106,7 +106,7 @@ int64_t computeChecksum(
 
 /// Returns the serialized byte width of a fixed-width type, matching the
 /// sizeof(WireType) used in flushValuesChunked.
-int32_t fixedTypeWidth(TypeKind kind) {
+int32_t fixedTypeWidth(TypeKind kind, const SerdeOpts& opts) {
   switch (kind) {
     case TypeKind::BOOLEAN:
     case TypeKind::TINYINT:
@@ -119,23 +119,27 @@ int32_t fixedTypeWidth(TypeKind kind) {
     case TypeKind::BIGINT:
     case TypeKind::DOUBLE:
       return 8;
-    case TypeKind::TIMESTAMP:
     case TypeKind::HUGEINT:
       return 16;
+    case TypeKind::TIMESTAMP:
+      return opts.useLosslessTimestamp ? 16 : 8;
     default:
       return 0;
   }
 }
 
 /// Returns the exact bytes for one fixed-width column in one partition.
-int64_t
-simpleColumnBytes(const TypePtr& colType, int64_t numRows, int64_t numNulls) {
+int64_t simpleColumnBytes(
+    const TypePtr& colType,
+    int64_t numRows,
+    int64_t numNulls,
+    int64_t valueWidth) {
   const auto encodingName = typeToEncodingName(colType);
   return 4 + static_cast<int64_t>(encodingName.size()) + // header
       4 + // rowCount
       1 + // nullFlag
       (numNulls > 0 ? bits::nbytes(numRows) : 0) + // null bitmap
-      (numRows - numNulls) * fixedTypeWidth(colType->kind()); // values
+      (numRows - numNulls) * valueWidth; // values
 }
 
 /// Returns the exact bytes for the framing of one ROW column block in one
@@ -512,6 +516,109 @@ void flushValuesChunked(
   }
 }
 
+// Two-word wire layout of one timestamp when useLosslessTimestamp is set.
+struct LosslessTimestamp {
+  int64_t seconds;
+  int64_t nanos;
+};
+
+// Writes timestamp values through flushValuesChunked in the wire precision
+// selected by 'opts'. 'valueAt' reads one row's Timestamp. The in-memory
+// Timestamp layout never matches any wire layout, so there is no contiguous
+// fast path.
+template <typename ValueAt>
+void flushTimestampValues(
+    const SerdeOpts& opts,
+    const uint64_t* rawNulls,
+    const uint64_t* parentNulls,
+    const vector_size_t* partitionOffsets,
+    uint32_t numPartitions,
+    Scratch& scratch,
+    const std::vector<IOBufOutputStream*>& outputStreams,
+    ValueAt valueAt) {
+  if (opts.useLosslessTimestamp) {
+    flushValuesChunked<LosslessTimestamp>(
+        nullptr,
+        rawNulls,
+        parentNulls,
+        partitionOffsets,
+        numPartitions,
+        scratch,
+        outputStreams,
+        [&](vector_size_t row) -> LosslessTimestamp {
+          const Timestamp timestamp = valueAt(row);
+          return {
+              timestamp.getSeconds(),
+              static_cast<int64_t>(timestamp.getNanos()),
+          };
+        });
+  } else if (opts.useMicrosecondPrecision) {
+    flushValuesChunked<int64_t>(
+        nullptr,
+        rawNulls,
+        parentNulls,
+        partitionOffsets,
+        numPartitions,
+        scratch,
+        outputStreams,
+        [&](vector_size_t row) { return valueAt(row).toMicros(); });
+  } else {
+    flushValuesChunked<int64_t>(
+        nullptr,
+        rawNulls,
+        parentNulls,
+        partitionOffsets,
+        numPartitions,
+        scratch,
+        outputStreams,
+        [&](vector_size_t row) { return valueAt(row).toMillis(); });
+  }
+}
+
+// Writes one wire value repeated for every live row of each partition,
+// chunked through scratch. 'parentLiveCounts' overrides the partition row
+// counts when ancestor ROW levels drop rows.
+template <typename WireType>
+void flushConstantValue(
+    const WireType& value,
+    const vector_size_t* partitionOffsets,
+    const std::vector<vector_size_t>* parentLiveCounts,
+    uint32_t numPartitions,
+    Scratch& scratch,
+    const std::vector<IOBufOutputStream*>& outputStreams) {
+  ScratchPtr<WireType> values(scratch);
+  const auto numRowsPerChunk =
+      std::max<vector_size_t>(1, kChunkBytes / sizeof(WireType));
+  const char* chunkBytes = nullptr;
+
+  // Every value of a non-null constant is written, so only the number of rows
+  // to write per partition matters. 'parentLiveCounts' already excludes the
+  // rows dropped by a null ancestor ROW level.
+  vector_size_t lastOffset = 0;
+  for (uint32_t p = 0; p < numPartitions; ++p) {
+    const auto offset = partitionOffsets[p];
+    auto numRows = parentLiveCounts != nullptr ? (*parentLiveCounts)[p]
+                                               : offset - lastOffset;
+    if (numRows > 0) {
+      VELOX_DCHECK_NOT_NULL(outputStreams[p]);
+
+      if (chunkBytes == nullptr) {
+        auto* ptr = values.get(numRowsPerChunk);
+        std::fill_n(ptr, numRowsPerChunk, value);
+        chunkBytes = reinterpret_cast<const char*>(ptr);
+      }
+
+      while (numRows > 0) {
+        const auto numChunkRows =
+            std::min<vector_size_t>(numRowsPerChunk, numRows);
+        outputStreams[p]->write(chunkBytes, numChunkRows * sizeof(WireType));
+        numRows -= numChunkRows;
+      }
+    }
+    lastOffset = offset;
+  }
+}
+
 } // namespace
 
 /// Base class for column nodes in the serializer's per-partition accounting.
@@ -529,9 +636,8 @@ class ColumnBufferState {
 
   virtual ~ColumnBufferState() = default;
 
-  static std::unique_ptr<ColumnBufferState> create(
-      const TypePtr& type,
-      uint32_t numPartitions);
+  static std::unique_ptr<ColumnBufferState>
+  create(const TypePtr& type, uint32_t numPartitions, const SerdeOpts& opts);
 
   virtual void append(const PartitionedVectorPtr& partitionedVector) = 0;
 
@@ -598,8 +704,12 @@ class ColumnBufferState {
 /// Buffer state for one fixed-width column.
 class FixedWidthBufferState : public ColumnBufferState {
  public:
-  FixedWidthBufferState(TypePtr type, uint32_t numPartitions)
-      : ColumnBufferState(std::move(type), numPartitions) {}
+  FixedWidthBufferState(
+      TypePtr type,
+      uint32_t numPartitions,
+      const SerdeOpts& opts)
+      : ColumnBufferState(std::move(type), numPartitions),
+        valueWidth_(fixedTypeWidth(type_->kind(), opts)) {}
 
   void append(const PartitionedVectorPtr& partitionedVector) override {
     for (auto p = 0; p < numPartitions_; ++p) {
@@ -620,7 +730,8 @@ class FixedWidthBufferState : public ColumnBufferState {
       }
       rows += numRows;
       nulls += numNulls;
-      bytesPerPartition_[p] = simpleColumnBytes(type_, rows, nulls);
+      bytesPerPartition_[p] =
+          simpleColumnBytes(type_, rows, nulls, valueWidth_);
     }
   }
 
@@ -638,12 +749,17 @@ class FixedWidthBufferState : public ColumnBufferState {
     VELOX_DCHECK_GE(nullBitmapBytes, bufferedNullBitmapBytes);
 
     return numNewPartitions *
-        simpleColumnBytes(type_, 0, 0) + // incremental header bytes
+        simpleColumnBytes(type_, 0, 0, valueWidth_) + // incremental header
         nullBitmapBytes -
         bufferedNullBitmapBytes + // incremental null bitmap bytes
         static_cast<int64_t>(numRows - inputNulls.value_or(0)) *
-        fixedTypeWidth(type_->kind()); // incremental value bytes
+        valueWidth_; // incremental value bytes
   }
+
+ private:
+  // Serialized bytes per non-null value, fixed by the column type and serde
+  // options at construction.
+  const int64_t valueWidth_;
 };
 
 /// Buffer state for one VARCHAR or VARBINARY column.
@@ -829,7 +945,8 @@ class RowBufferState : public ColumnBufferState {
 
 std::unique_ptr<ColumnBufferState> ColumnBufferState::create(
     const TypePtr& type,
-    uint32_t numPartitions) {
+    uint32_t numPartitions,
+    const SerdeOpts& opts) {
   switch (type->kind()) {
     case TypeKind::BOOLEAN:
     case TypeKind::TINYINT:
@@ -839,7 +956,8 @@ std::unique_ptr<ColumnBufferState> ColumnBufferState::create(
     case TypeKind::REAL:
     case TypeKind::DOUBLE:
     case TypeKind::HUGEINT:
-      return std::make_unique<FixedWidthBufferState>(type, numPartitions);
+    case TypeKind::TIMESTAMP:
+      return std::make_unique<FixedWidthBufferState>(type, numPartitions, opts);
     case TypeKind::VARCHAR:
     case TypeKind::VARBINARY:
       return std::make_unique<VariableWidthBufferState>(type, numPartitions);
@@ -849,12 +967,11 @@ std::unique_ptr<ColumnBufferState> ColumnBufferState::create(
       children.reserve(rowType.size());
       for (auto column = 0; column < rowType.size(); ++column) {
         children.push_back(
-            ColumnBufferState::create(rowType.childAt(column), numPartitions));
+            create(rowType.childAt(column), numPartitions, opts));
       }
       return std::make_unique<RowBufferState>(
           type, numPartitions, std::move(children));
     }
-    case TypeKind::TIMESTAMP:
     case TypeKind::ARRAY:
     case TypeKind::MAP:
       VELOX_NYI(
@@ -881,9 +998,8 @@ class BufferState {
         bytesPerPartition_(numPartitions, 0),
         children_(std::move(children)) {}
 
-  static std::unique_ptr<BufferState> create(
-      const RowTypePtr& type,
-      uint32_t numPartitions);
+  static std::unique_ptr<BufferState>
+  create(const RowTypePtr& type, uint32_t numPartitions, const SerdeOpts& opts);
 
   void append(
       const PartitionedVectorPtr& partitionedVector,
@@ -965,12 +1081,13 @@ class BufferState {
 
 std::unique_ptr<BufferState> BufferState::create(
     const RowTypePtr& type,
-    uint32_t numPartitions) {
+    uint32_t numPartitions,
+    const SerdeOpts& opts) {
   std::vector<std::unique_ptr<ColumnBufferState>> children;
   children.reserve(type->size());
   for (auto column = 0; column < type->size(); ++column) {
     children.push_back(
-        ColumnBufferState::create(type->childAt(column), numPartitions));
+        ColumnBufferState::create(type->childAt(column), numPartitions, opts));
   }
   return std::make_unique<BufferState>(numPartitions, std::move(children));
 }
@@ -989,13 +1106,16 @@ PrestoIterativePartitioningSerializer::PrestoIterativePartitioningSerializer(
       pool_(pool),
       listenerFactory_(std::move(listenerFactory)),
       numColumns_(outputType_->size()),
-      bufferState_(BufferState::create(outputType_, numPartitions_)) {
+      bufferState_(BufferState::create(outputType_, numPartitions_, opts_)) {
   VELOX_CHECK_GT(numPartitions_, 0);
   VELOX_CHECK_NOT_NULL(pool_);
   VELOX_CHECK(
       outputToInputChannels_.empty() ||
           outputToInputChannels_.size() == outputType_->size(),
       "outputToInputChannels size must match output column count");
+  VELOX_CHECK(
+      !(opts_.useLosslessTimestamp && opts_.useMicrosecondPrecision),
+      "useLosslessTimestamp and useMicrosecondPrecision are mutually exclusive");
 }
 
 PrestoIterativePartitioningSerializer::
@@ -1345,6 +1465,7 @@ void PrestoIterativePartitioningSerializer::flushColumn(
     case TypeKind::REAL:
     case TypeKind::DOUBLE:
     case TypeKind::HUGEINT:
+    case TypeKind::TIMESTAMP:
       flushSimpleColumn(
           partitionedVectors,
           colType,
@@ -1373,7 +1494,6 @@ void PrestoIterativePartitioningSerializer::flushColumn(
           context);
       break;
 
-    case TypeKind::TIMESTAMP:
     case TypeKind::ARRAY:
     case TypeKind::MAP:
       VELOX_NYI(
@@ -1768,14 +1888,36 @@ void PrestoIterativePartitioningSerializer::flushSingleFlatVector<
       });
 }
 
+template <>
+void PrestoIterativePartitioningSerializer::flushSingleFlatVector<
+    TypeKind::TIMESTAMP>(
+    const PartitionedVectorPtr& partitionedVector,
+    const std::vector<IOBufOutputStream*>& outputStreams,
+    const uint64_t* parentNulls) const {
+  auto* flatVector = partitionedVector->as<PartitionedFlatVector<Timestamp>>();
+  VELOX_DCHECK_NOT_NULL(flatVector);
+
+  const auto* rawValues =
+      flatVector->baseVector()->as<FlatVector<Timestamp>>()->rawValues();
+  const auto* rawNulls = flatVector->baseVector()->rawNulls();
+
+  flushTimestampValues(
+      opts_,
+      rawNulls,
+      parentNulls,
+      flatVector->rawPartitionOffsets(),
+      numPartitions_,
+      scratch_,
+      outputStreams,
+      [rawValues](vector_size_t row) { return rawValues[row]; });
+}
+
 template <TypeKind kind>
 void PrestoIterativePartitioningSerializer::flushSingleConstantVector(
     const PartitionedVectorPtr& partitionedVector,
     const std::vector<IOBufOutputStream*>& outputStreams,
     const std::vector<vector_size_t>* parentLiveCounts) const {
-  if constexpr (
-      kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY ||
-      kind == TypeKind::TIMESTAMP) {
+  if constexpr (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
     VELOX_NYI(
         "flushSingleConstantVector does not support variable-length type: {}",
         kind);
@@ -1790,39 +1932,58 @@ void PrestoIterativePartitioningSerializer::flushSingleConstantVector(
     return;
   }
 
+  flushConstantValue(
+      constantVector->valueAtFast(0),
+      partitionedVector->rawPartitionOffsets(),
+      parentLiveCounts,
+      numPartitions_,
+      scratch_,
+      outputStreams);
+}
+
+template <>
+void PrestoIterativePartitioningSerializer::flushSingleConstantVector<
+    TypeKind::TIMESTAMP>(
+    const PartitionedVectorPtr& partitionedVector,
+    const std::vector<IOBufOutputStream*>& outputStreams,
+    const std::vector<vector_size_t>* parentLiveCounts) const {
+  auto* constantVector =
+      partitionedVector->baseVector()->as<ConstantVector<Timestamp>>();
+  VELOX_DCHECK_NOT_NULL(constantVector);
+
+  if (constantVector->isNullAt(0)) {
+    return;
+  }
+
   const auto value = constantVector->valueAtFast(0);
   const auto* partitionOffsets = partitionedVector->rawPartitionOffsets();
-
-  ScratchPtr<T> values(scratch_);
-  const auto numRowsPerChunk =
-      std::max<vector_size_t>(1, kChunkBytes / sizeof(T));
-  const char* chunkBytes = nullptr;
-
-  // Every value of a non-null constant is written, so only the number of rows
-  // to write per partition matters. 'parentLiveCounts' already excludes the
-  // rows dropped by a null ancestor ROW level.
-  vector_size_t lastOffset = 0;
-  for (uint32_t p = 0; p < numPartitions_; ++p) {
-    const auto offset = partitionOffsets[p];
-    auto numRows = parentLiveCounts != nullptr ? (*parentLiveCounts)[p]
-                                               : offset - lastOffset;
-    if (numRows > 0) {
-      VELOX_DCHECK_NOT_NULL(outputStreams[p]);
-
-      if (chunkBytes == nullptr) {
-        auto* ptr = values.get(numRowsPerChunk);
-        std::fill_n(ptr, numRowsPerChunk, value);
-        chunkBytes = reinterpret_cast<const char*>(ptr);
-      }
-
-      while (numRows > 0) {
-        const auto numChunkRows =
-            std::min<vector_size_t>(numRowsPerChunk, numRows);
-        outputStreams[p]->write(chunkBytes, numChunkRows * sizeof(T));
-        numRows -= numChunkRows;
-      }
-    }
-    lastOffset = offset;
+  if (opts_.useLosslessTimestamp) {
+    flushConstantValue(
+        LosslessTimestamp{
+            value.getSeconds(),
+            static_cast<int64_t>(value.getNanos()),
+        },
+        partitionOffsets,
+        parentLiveCounts,
+        numPartitions_,
+        scratch_,
+        outputStreams);
+  } else if (opts_.useMicrosecondPrecision) {
+    flushConstantValue(
+        value.toMicros(),
+        partitionOffsets,
+        parentLiveCounts,
+        numPartitions_,
+        scratch_,
+        outputStreams);
+  } else {
+    flushConstantValue(
+        value.toMillis(),
+        partitionOffsets,
+        parentLiveCounts,
+        numPartitions_,
+        scratch_,
+        outputStreams);
   }
 }
 
@@ -1859,6 +2020,40 @@ void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector(
       scratch_,
       outputStreams,
       [dictionaryVector](vector_size_t row) -> WireType {
+        return dictionaryVector->valueAtFast(row);
+      });
+}
+
+template <>
+void PrestoIterativePartitioningSerializer::flushSingleDictionaryVector<
+    TypeKind::TIMESTAMP>(
+    const PartitionedVectorPtr& partitionedVector,
+    const std::vector<IOBufOutputStream*>& outputStreams,
+    const uint64_t* parentNulls) const {
+  auto baseVector = partitionedVector->baseVector();
+  auto* dictionaryVector = baseVector->as<DictionaryVector<Timestamp>>();
+  VELOX_DCHECK_NOT_NULL(dictionaryVector);
+
+  // Evaluate the dictionary's nulls as one flat bitmap so the shared chunked
+  // writer applies. When the wrapped values have no nulls the wrapper's own
+  // bitmap is that bitmap; otherwise the combined nulls are materialized row
+  // by row.
+  const auto* rawNulls = baseVector->rawNulls();
+  BufferPtr combined;
+  if (dictionaryVector->valueVector()->mayHaveNulls()) {
+    combined = combinedNulls(*baseVector, pool_);
+    rawNulls = combined ? combined->as<uint64_t>() : nullptr;
+  }
+
+  flushTimestampValues(
+      opts_,
+      rawNulls,
+      parentNulls,
+      partitionedVector->rawPartitionOffsets(),
+      numPartitions_,
+      scratch_,
+      outputStreams,
+      [dictionaryVector](vector_size_t row) {
         return dictionaryVector->valueAtFast(row);
       });
 }

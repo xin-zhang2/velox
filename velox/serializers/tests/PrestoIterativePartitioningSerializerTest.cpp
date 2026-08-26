@@ -62,11 +62,14 @@ class PrestoIterativePartitioningSerializerTestBase : public VectorTestBase {
   }
 
   /// Deserializes an IOBuf produced by PartitioningSerializer::flush().
-  RowVectorPtr deserialize(folly::IOBuf& iobuf, const RowTypePtr& type) {
+  RowVectorPtr deserialize(
+      folly::IOBuf& iobuf,
+      const RowTypePtr& type,
+      const SerdeOpts* opts = nullptr) {
     auto ranges = byteRangesFromIOBuf(&iobuf);
     BufferInputStream stream(std::move(ranges));
     RowVectorPtr result;
-    serde_.deserialize(&stream, pool_.get(), type, &result, nullptr);
+    serde_.deserialize(&stream, pool_.get(), type, &result, opts);
     return result;
   }
 
@@ -125,6 +128,13 @@ class PrestoIterativePartitioningSerializerTestBase : public VectorTestBase {
       const RowTypePtr& type,
       uint32_t numPartitions) {
     SerdeOpts opts;
+    return makeSerializer(type, numPartitions, opts);
+  }
+
+  std::unique_ptr<PrestoIterativePartitioningSerializer> makeSerializer(
+      const RowTypePtr& type,
+      uint32_t numPartitions,
+      const SerdeOpts& opts) {
     return std::make_unique<PrestoIterativePartitioningSerializer>(
         type,
         numPartitions,
@@ -1700,6 +1710,215 @@ TEST_F(PrestoIterativePartitioningSerializerTest, multipleCycles) {
   }
 }
 
+// ── Timestamp
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    timestampFlatAllPrecisionModes) {
+  auto type = ROW({"t"}, {TIMESTAMP()});
+
+  std::vector<SerdeOpts> options(3);
+  options[1].useMicrosecondPrecision = true;
+  options[2].useLosslessTimestamp = true;
+
+  const std::vector<std::optional<Timestamp>> inputValues{
+      Timestamp{0, 17'123'456},
+      std::nullopt,
+      Timestamp{12, 999'999'999},
+      Timestamp{-1, 17'123'456},
+      std::nullopt,
+      Timestamp{42, 123'456'789},
+  };
+  const std::vector<uint32_t> partitions{0, 1, 0, 1, 0, 1};
+
+  for (const auto& opts : options) {
+    auto normalize = [&](const std::optional<Timestamp>& timestamp)
+        -> std::optional<Timestamp> {
+      if (!timestamp.has_value() || opts.useLosslessTimestamp) {
+        return timestamp;
+      }
+      return opts.useMicrosecondPrecision
+          ? Timestamp::fromMicros(timestamp->toMicros())
+          : Timestamp::fromMillis(timestamp->toMillis());
+    };
+
+    auto serializer = makeSerializer(type, 2, opts);
+    serializer->append(
+        makeRowVector({"t"}, {makeNullableFlatVector<Timestamp>(inputValues)}),
+        partitions);
+
+    const auto bytesBuffered = serializer->bytesBuffered();
+    const auto valueWidth = opts.useLosslessTimestamp ? 16 : 8;
+    EXPECT_EQ(
+        bytesBuffered,
+        2 * simpleColumnPageBytes("LONG_ARRAY", 3, 1, valueWidth));
+
+    auto pages = serializer->flush();
+    ASSERT_EQ(pages.size(), 2);
+    EXPECT_EQ(bytesBuffered, totalFlushedBytes(pages));
+
+    auto r0 = deserialize(*pages.at(0).first, type, &opts);
+    auto r1 = deserialize(*pages.at(1).first, type, &opts);
+
+    EXPECT_EQ(
+        nullableValues<Timestamp>(r0, 0),
+        (std::vector<std::optional<Timestamp>>{
+            normalize(inputValues[0]),
+            normalize(inputValues[2]),
+            std::nullopt,
+        }));
+    EXPECT_EQ(
+        nullableValues<Timestamp>(r1, 0),
+        (std::vector<std::optional<Timestamp>>{
+            std::nullopt,
+            normalize(inputValues[3]),
+            normalize(inputValues[5]),
+        }));
+  }
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    timestampConstantAcrossAppends) {
+  auto type = ROW({"t"}, {TIMESTAMP()});
+  SerdeOpts opts;
+  opts.useLosslessTimestamp = true;
+
+  const Timestamp first{7, 123'456'789};
+  const Timestamp second{-2, 987'654'321};
+
+  auto serializer = makeSerializer(type, 2, opts);
+  serializer->append(
+      makeRowVector({"t"}, {makeConstant<Timestamp>(first, 3)}), {0, 1, 0});
+  serializer->append(
+      makeRowVector({"t"}, {makeConstant<Timestamp>(std::nullopt, 2)}), {0, 1});
+  serializer->append(
+      makeRowVector({"t"}, {makeConstant<Timestamp>(second, 3)}), {1, 0, 1});
+
+  const auto bytesBuffered = serializer->bytesBuffered();
+  EXPECT_EQ(bytesBuffered, 2 * simpleColumnPageBytes("LONG_ARRAY", 4, 1, 16));
+
+  auto pages = serializer->flush();
+  ASSERT_EQ(pages.size(), 2);
+  EXPECT_EQ(bytesBuffered, totalFlushedBytes(pages));
+
+  auto r0 = deserialize(*pages.at(0).first, type, &opts);
+  auto r1 = deserialize(*pages.at(1).first, type, &opts);
+
+  EXPECT_EQ(
+      nullableValues<Timestamp>(r0, 0),
+      (std::vector<std::optional<Timestamp>>{
+          first, first, std::nullopt, second}));
+  EXPECT_EQ(
+      nullableValues<Timestamp>(r1, 0),
+      (std::vector<std::optional<Timestamp>>{
+          first, std::nullopt, second, second}));
+}
+
+TEST_F(PrestoIterativePartitioningSerializerTest, timestampDictionaryVector) {
+  auto type = ROW({"t"}, {TIMESTAMP()});
+  SerdeOpts opts;
+  opts.useMicrosecondPrecision = true;
+
+  const Timestamp timestamp1{1, 123'456'789};
+  const Timestamp timestamp3{-3, 987'654'321};
+  const Timestamp timestamp4{4, 111'222'333};
+  auto base = makeNullableFlatVector<Timestamp>(
+      {timestamp1, std::nullopt, timestamp3, timestamp4});
+  auto dictionary = BaseVector::wrapInDictionary(
+      makeNulls({false, true, false, false, false, false}),
+      makeIndices({3, 2, 1, 0, 3, 2}),
+      6,
+      base);
+
+  auto serializer = makeSerializer(type, 2, opts);
+  serializer->append(makeRowVector({"t"}, {dictionary}), {0, 1, 0, 1, 0, 1});
+
+  const auto bytesBuffered = serializer->bytesBuffered();
+  EXPECT_EQ(bytesBuffered, 2 * simpleColumnPageBytes("LONG_ARRAY", 3, 1, 8));
+
+  auto pages = serializer->flush();
+  ASSERT_EQ(pages.size(), 2);
+  EXPECT_EQ(bytesBuffered, totalFlushedBytes(pages));
+
+  auto r0 = deserialize(*pages.at(0).first, type, &opts);
+  auto r1 = deserialize(*pages.at(1).first, type, &opts);
+  const auto normalized1 = Timestamp::fromMicros(timestamp1.toMicros());
+  const auto normalized3 = Timestamp::fromMicros(timestamp3.toMicros());
+  const auto normalized4 = Timestamp::fromMicros(timestamp4.toMicros());
+
+  EXPECT_EQ(
+      nullableValues<Timestamp>(r0, 0),
+      (std::vector<std::optional<Timestamp>>{
+          normalized4, std::nullopt, normalized4}));
+  EXPECT_EQ(
+      nullableValues<Timestamp>(r1, 0),
+      (std::vector<std::optional<Timestamp>>{
+          std::nullopt, normalized1, normalized3}));
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    timestampNestedRowParentNulls) {
+  auto nestedType = ROW({"t"}, {TIMESTAMP()});
+  auto type = ROW({"r"}, {nestedType});
+  SerdeOpts opts;
+  opts.useLosslessTimestamp = true;
+
+  const std::vector<Timestamp> timestamps{
+      Timestamp{0, 1},
+      Timestamp{1, 2},
+      Timestamp{2, 3},
+      Timestamp{3, 4},
+      Timestamp{4, 5},
+      Timestamp{5, 6},
+  };
+  auto nested = makeRowVector(
+      {"t"}, {makeFlatVector<Timestamp>(timestamps)}, [](auto row) {
+        return row == 1 || row == 4;
+      });
+
+  auto serializer = makeSerializer(type, 2, opts);
+  serializer->append(makeRowVector({"r"}, {nested}), {0, 1, 0, 1, 0, 1});
+  auto pages = serializer->flush();
+  ASSERT_EQ(pages.size(), 2);
+
+  auto r0 = deserialize(*pages.at(0).first, type, &opts);
+  auto r1 = deserialize(*pages.at(1).first, type, &opts);
+  auto* row0 = r0->childAt(0)->as<RowVector>();
+  auto* row1 = r1->childAt(0)->as<RowVector>();
+  auto* timestamps0 = row0->childAt(0)->as<FlatVector<Timestamp>>();
+  auto* timestamps1 = row1->childAt(0)->as<FlatVector<Timestamp>>();
+
+  ASSERT_EQ(r0->size(), 3);
+  EXPECT_FALSE(row0->isNullAt(0));
+  EXPECT_EQ(timestamps0->valueAt(0), timestamps[0]);
+  EXPECT_FALSE(row0->isNullAt(1));
+  EXPECT_EQ(timestamps0->valueAt(1), timestamps[2]);
+  EXPECT_TRUE(row0->isNullAt(2));
+
+  ASSERT_EQ(r1->size(), 3);
+  EXPECT_TRUE(row1->isNullAt(0));
+  EXPECT_FALSE(row1->isNullAt(1));
+  EXPECT_EQ(timestamps1->valueAt(1), timestamps[3]);
+  EXPECT_FALSE(row1->isNullAt(2));
+  EXPECT_EQ(timestamps1->valueAt(2), timestamps[5]);
+}
+
+TEST_F(
+    PrestoIterativePartitioningSerializerTest,
+    timestampPrecisionOptionsAreMutuallyExclusive) {
+  SerdeOpts opts;
+  opts.useLosslessTimestamp = true;
+  opts.useMicrosecondPrecision = true;
+
+  VELOX_ASSERT_THROW(
+      std::make_unique<PrestoIterativePartitioningSerializer>(
+          ROW({"t"}, {TIMESTAMP()}), 1, opts, pool_.get()),
+      "useLosslessTimestamp and useMicrosecondPrecision are mutually exclusive");
+}
+
 // ── Encoding
 // ─────────────────────────────────────────────────────────────────
 
@@ -2322,10 +2541,13 @@ TEST_F(
   for (int col = 0; col < kNumCols; ++col) {
     names.push_back(fmt::format("c{}", col));
     // Rows where (row % 2 == 0) are null; the rest hold (row * kNumCols + col).
-    children.push_back(makeFlatVector<int64_t>(
-        kNumRows,
-        [col](auto row) { return static_cast<int64_t>(row * kNumCols + col); },
-        [](auto row) { return (row % 2) == 0; }));
+    children.push_back(
+        makeFlatVector<int64_t>(
+            kNumRows,
+            [col](auto row) {
+              return static_cast<int64_t>(row * kNumCols + col);
+            },
+            [](auto row) { return (row % 2) == 0; }));
   }
 
   auto input = makeRowVector(names, children);
