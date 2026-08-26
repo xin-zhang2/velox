@@ -135,8 +135,10 @@ DestinationBuffer::Data DestinationBuffer::getData(
       }
       if (!remainingBytes.empty()) {
         return {
+            .data = {},
             .remainingBytes = std::move(remainingBytes),
             .immediate = true,
+            .pageNumRows = {},
         };
       }
     }
