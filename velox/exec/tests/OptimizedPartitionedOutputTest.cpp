@@ -17,6 +17,7 @@
 #include <cstring>
 #include <future>
 #include <random>
+#include <set>
 #include <string_view>
 
 #include <gmock/gmock.h>
@@ -1067,21 +1068,23 @@ TEST_F(
   velox::test::assertEqualVectors(expected, actual);
 }
 
-// Verifies that replicateNullsAndAny raises an error since it is not yet
-// supported by OptimizedPartitionedOutput.
-TEST_F(OptimizedPartitionedOutputTest, replicateNullsAndAnyUnsupported) {
+TEST_F(OptimizedPartitionedOutputTest, replicateNullsAndAny) {
+  constexpr int kNumPartitions = 3;
   auto input = makeRowVector(
       {"p1", "v1"},
-      {makeNullableFlatVector<int32_t>({0, std::nullopt, 1}),
-       makeFlatVector<std::string>({"a", "b", "c"})});
+      {makeNullableFlatVector<int32_t>({0, std::nullopt, 1, std::nullopt, 2}),
+       makeFlatVector<std::string>({"a", "b", "c", "d", "e"})});
 
-  auto plan =
-      PlanBuilder()
-          .values({input})
-          .partitionedOutput({"p1"}, 2, /*replicateNullsAndAny=*/true, {"v1"})
-          .planNode();
+  auto plan = PlanBuilder()
+                  .values({input})
+                  .partitionedOutput(
+                      {"p1"},
+                      kNumPartitions,
+                      /*replicateNullsAndAny=*/true,
+                      {"v1"})
+                  .planNode();
 
-  auto taskId = "local://test-replicate-nulls-unsupported-0";
+  auto taskId = "local://test-replicate-nulls-and-any-0";
   auto task = Task::create(
       taskId,
       core::PlanFragment{plan},
@@ -1090,14 +1093,39 @@ TEST_F(OptimizedPartitionedOutputTest, replicateNullsAndAnyUnsupported) {
       Task::ExecutionMode::kParallel);
   task->start(1);
 
+  // Drain all partitions concurrently to avoid deadlock with the driver.
+  std::vector<std::future<std::vector<std::unique_ptr<folly::IOBuf>>>> futures;
+  futures.reserve(kNumPartitions);
+  for (int p = 0; p < kNumPartitions; ++p) {
+    futures.push_back(std::async(std::launch::async, [&, p] {
+      return getAllData(taskId, p);
+    }));
+  }
+
   const auto taskWaitUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                              std::chrono::seconds{10})
+                              std::chrono::seconds{30})
                               .count();
-  ASSERT_TRUE(waitForTaskFailure(task.get(), taskWaitUs));
-  ASSERT_THAT(
-      task->errorMessage(),
-      testing::HasSubstr(
-          "replicateNullsAndAny is not yet supported by OptimizedPartitionedOutput"));
+  ASSERT_TRUE(waitForTaskCompletion(task.get(), taskWaitUs));
+
+  const auto outputType = ROW({"v1"}, {VARCHAR()});
+  std::multiset<std::string> allValues;
+  for (int p = 0; p < kNumPartitions; ++p) {
+    auto rows = concatPages(futures[p].get(), outputType);
+    std::multiset<std::string> partitionValues;
+    auto* values = rows->childAt(0)->as<SimpleVector<StringView>>();
+    for (vector_size_t i = 0; i < rows->size(); ++i) {
+      partitionValues.insert(std::string(values->valueAt(i)));
+    }
+    // Null-key rows and the first row reach every destination.
+    EXPECT_EQ(partitionValues.count("a"), 1) << "partition " << p;
+    EXPECT_EQ(partitionValues.count("b"), 1) << "partition " << p;
+    EXPECT_EQ(partitionValues.count("d"), 1) << "partition " << p;
+    allValues.insert(partitionValues.begin(), partitionValues.end());
+  }
+
+  EXPECT_EQ(allValues.count("c"), 1);
+  EXPECT_EQ(allValues.count("e"), 1);
+  EXPECT_EQ(allValues.size(), 3 * kNumPartitions + 2);
 }
 
 TEST_F(OptimizedPartitionedOutputTest, outputLayout) {
