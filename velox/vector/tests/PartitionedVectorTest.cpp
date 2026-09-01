@@ -687,6 +687,38 @@ TEST_F(PartitioningVectorTest, reusePartitionedDictionaryIndices) {
   EXPECT_NE(first->indices(), sharedIndices);
 }
 
+TEST_F(PartitioningVectorTest, aliasedChildrenPartitionedOnce) {
+  constexpr vector_size_t kNumValues{8};
+  auto shared = makeNullableFlatVector<int64_t>(
+      {0, 10, std::nullopt, 30, 40, std::nullopt, 60, 70});
+  auto row = makeRowVector({
+      makeFlatVector<int64_t>(kNumValues, [](auto row) { return row; }),
+      shared,
+      shared,
+  });
+
+  const std::vector<uint32_t> partitions{0, 1, 0, 1, 0, 1, 0, 1};
+  auto partitionedVector =
+      PartitionedVector::create(row, partitions, 2, ctx_, pool_.get());
+
+  auto* partitionedRow = partitionedVector->as<PartitionedRowVector>();
+  ASSERT_NE(partitionedRow, nullptr);
+  EXPECT_EQ(partitionedRow->childAt(1), partitionedRow->childAt(2));
+
+  auto expectedP0 = makeRowVector({
+      makeFlatVector<int64_t>({0, 2, 4, 6}),
+      makeNullableFlatVector<int64_t>({0, std::nullopt, 40, 60}),
+      makeNullableFlatVector<int64_t>({0, std::nullopt, 40, 60}),
+  });
+  auto expectedP1 = makeRowVector({
+      makeFlatVector<int64_t>({1, 3, 5, 7}),
+      makeNullableFlatVector<int64_t>({10, 30, std::nullopt, 70}),
+      makeNullableFlatVector<int64_t>({10, 30, std::nullopt, 70}),
+  });
+  test::assertEqualVectors(expectedP0, partitionedVector->partitionAt(0));
+  test::assertEqualVectors(expectedP1, partitionedVector->partitionAt(1));
+}
+
 // Test with different vector sizes, including edge cases like 0 and 1.
 INSTANTIATE_TEST_SUITE_P(
     FlatVectorSizes,
