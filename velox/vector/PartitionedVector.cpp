@@ -367,6 +367,7 @@ PartitionedVectorPtr PartitionedVector::create(
   VELOX_CHECK_NOT_NULL(pool);
 
   ctx.partitionedDictionaryIndices.clear();
+  ctx.partitionedVectors.clear();
 
   // Calculate the end offsets for each partition. For example, if there are 3
   // partitions with 2, 3, and 1 rows respectively, then endPartitionOffsets[0]
@@ -406,12 +407,19 @@ PartitionedVectorPtr PartitionedVector::create(
   VELOX_CHECK_EQ(
       endPartitionOffsets->size(), numPartitions * sizeof(vector_size_t));
 
+  // Partition shared vectors only once because partitioning mutates buffers.
+  if (const auto it = ctx.partitionedVectors.find(vector.get());
+      it != ctx.partitionedVectors.end()) {
+    return it->second;
+  }
+
   auto encoding = vector->encoding();
   auto typeKind = vector->typeKind();
 
+  PartitionedVectorPtr partitionedVector;
   switch (encoding) {
     case VectorEncoding::Simple::FLAT: {
-      auto partitionedFlatVector = VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      partitionedVector = VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
           createPartitionedFlatVector,
           typeKind,
           vector,
@@ -421,11 +429,11 @@ PartitionedVectorPtr PartitionedVector::create(
           endPartitionOffsets,
           ctx,
           pool);
-      return partitionedFlatVector;
+      break;
     }
 
     case VectorEncoding::Simple::ROW: {
-      return createPartitionedRowVector(
+      partitionedVector = createPartitionedRowVector(
           vector,
           partitions,
           singlePartition,
@@ -433,6 +441,7 @@ PartitionedVectorPtr PartitionedVector::create(
           endPartitionOffsets,
           ctx,
           pool);
+      break;
     }
 
     case VectorEncoding::Simple::CONSTANT: {
@@ -440,7 +449,8 @@ PartitionedVectorPtr PartitionedVector::create(
           std::make_shared<PartitionedConstantVector>(
               vector, numPartitions, endPartitionOffsets, pool);
       partitionedConstantVector->partition(partitions, singlePartition, ctx);
-      return partitionedConstantVector;
+      partitionedVector = std::move(partitionedConstantVector);
+      break;
     }
 
     case VectorEncoding::Simple::DICTIONARY: {
@@ -450,7 +460,16 @@ PartitionedVectorPtr PartitionedVector::create(
           RowVector::pushDictionaryToRowVectorLeaves(vector);
 
       if (rewrittenVector->encoding() == VectorEncoding::Simple::DICTIONARY) {
-        return createPartitionedDictionaryVector(
+        partitionedVector = createPartitionedDictionaryVector(
+            rewrittenVector,
+            partitions,
+            singlePartition,
+            numPartitions,
+            endPartitionOffsets,
+            ctx,
+            pool);
+      } else {
+        partitionedVector = create(
             rewrittenVector,
             partitions,
             singlePartition,
@@ -459,15 +478,7 @@ PartitionedVectorPtr PartitionedVector::create(
             ctx,
             pool);
       }
-
-      return create(
-          rewrittenVector,
-          partitions,
-          singlePartition,
-          numPartitions,
-          endPartitionOffsets,
-          ctx,
-          pool);
+      break;
     }
 
     case VectorEncoding::Simple::ARRAY:
@@ -482,6 +493,9 @@ PartitionedVectorPtr PartitionedVector::create(
       VELOX_UNREACHABLE(
           "Invalid vector encoding for PartitionedVector: {}", encoding);
   }
+
+  ctx.partitionedVectors.emplace(vector.get(), partitionedVector);
+  return partitionedVector;
 }
 
 VectorPtr PartitionedVector::baseVector() const {
